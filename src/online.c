@@ -37,6 +37,10 @@
 #define PROTOCOL        1
 #define ONLINE_MARGIN   380  /* every online match runs the widest simulation; each display shows its part */
 #define ONLINE_DELAY    2
+/* Raised whenever a change makes the same inputs play out differently (the game's code, not its data, so the
+ * starting state's hash alone can't tell): mixed into that hash, it turns away a player on another version.
+ * 2: rain and foliage across the widescreen margin (0.1.5). */
+#define SIM_REVISION    2
 #define PUNCH_MS        150
 #define RELAY_AFTER_MS  1500 /* no direct answer by then: through the server */
 #define SETUP_GIVE_UP_MS 20000
@@ -344,7 +348,7 @@ static int ContinuePreparing(void)
             if (field - O.phaseField >= 60) {
                 O.start = SDL_malloc(SaveStateCapacity());
                 SaveStateSave(O.start);
-                O.startHash = SaveStateHashState(O.start);
+                O.startHash = SaveStateHashState(O.start) ^ (SIM_REVISION * 0x9E3779B97F4A7C15ull);
                 O.preparing = 0;
                 fprintf(stderr, "online: %u ms: the starting state is ready (%d fields, hash %016llx)\n",
                         (unsigned)SDL_GetTicks(), field, (unsigned long long)O.startHash);
