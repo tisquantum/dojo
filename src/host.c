@@ -27,6 +27,7 @@
 #include "settings.h"
 #include "overlay.h"
 #include "online.h"
+#include "input.h"
 #include "host.h"
 
 void GameMain(void);
@@ -39,7 +40,6 @@ static uint32_t sPixels[VRAM_HEIGHT * VRAM_WIDTH];
 static const char *sDiscPath = "game_files/Bushido Blade (USA).bin";
 static int sQuit;
 static Uint64 sNextFieldTime;
-static SDL_Gamepad *sGamepads[2];
 static SDL_AudioStream *sAudio;
 static unsigned long sField;
 static unsigned long sShotEvery;  /* DOJO_SHOT_EVERY: save the display every this many fields */
@@ -113,54 +113,6 @@ static void FindGameFolder(void)
     }
 }
 
-/* Keyboard controls for port 1, in PadRead's button layout. */
-static const struct {
-    SDL_Scancode key;
-    unsigned button;
-} sKeyMap[] = {
-    {SDL_SCANCODE_UP, 1 << 12},     {SDL_SCANCODE_RIGHT, 1 << 13}, {SDL_SCANCODE_DOWN, 1 << 14},
-    {SDL_SCANCODE_LEFT, 1 << 15},   {SDL_SCANCODE_S, 1 << 4},      {SDL_SCANCODE_C, 1 << 5},
-    {SDL_SCANCODE_X, 1 << 6},       {SDL_SCANCODE_Z, 1 << 7},      {SDL_SCANCODE_Q, 1 << 2},
-    {SDL_SCANCODE_E, 1 << 3},       {SDL_SCANCODE_1, 1 << 0},      {SDL_SCANCODE_3, 1 << 1},
-    {SDL_SCANCODE_RETURN, 1 << 11}, {SDL_SCANCODE_BACKSPACE, 1 << 8},
-};
-
-static const struct {
-    SDL_GamepadButton button;
-    unsigned mask;
-} sPadMap[] = {
-    {SDL_GAMEPAD_BUTTON_DPAD_UP, 1 << 12},    {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, 1 << 13},
-    {SDL_GAMEPAD_BUTTON_DPAD_DOWN, 1 << 14},  {SDL_GAMEPAD_BUTTON_DPAD_LEFT, 1 << 15},
-    {SDL_GAMEPAD_BUTTON_NORTH, 1 << 4},       {SDL_GAMEPAD_BUTTON_EAST, 1 << 5},
-    {SDL_GAMEPAD_BUTTON_SOUTH, 1 << 6},       {SDL_GAMEPAD_BUTTON_WEST, 1 << 7},
-    {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, 1 << 2}, {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, 1 << 3},
-    {SDL_GAMEPAD_BUTTON_START, 1 << 11},      {SDL_GAMEPAD_BUTTON_BACK, 1 << 8},
-};
-
-static unsigned GamepadButtons(SDL_Gamepad *pad)
-{
-    unsigned buttons = 0;
-    size_t i;
-    for (i = 0; i < sizeof(sPadMap) / sizeof(sPadMap[0]); i++) {
-        if (SDL_GetGamepadButton(pad, sPadMap[i].button)) {
-            buttons |= sPadMap[i].mask;
-        }
-    }
-    if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) {
-        buttons |= 1 << 0;
-    }
-    if (g_settings.analog) {
-        /* The left stick as the d-pad, past half way. */
-        int x = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX), y = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
-        buttons |= (y < -16000 ? 1u << 12 : 0) | (x > 16000 ? 1u << 13 : 0) | (y > 16000 ? 1u << 14 : 0) |
-                   (x < -16000 ? 1u << 15 : 0);
-    }
-    if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) {
-        buttons |= 1 << 1;
-    }
-    return buttons;
-}
-
 /* DOJO_PRESS: "field:button[+button],..." holds those buttons for 4 fields from each field, for driving
  * the game without a person (start, select, up, down, left, right, x, o, s, t, l1, r1, l2, r2; a "p2"
  * prefix, as in p2x, presses player two's). Returns port `port`'s buttons. */
@@ -207,31 +159,21 @@ static unsigned ScriptedButtons(int port)
     return buttons;
 }
 
-/* This machine's first player: the keyboard, the first gamepad and the script's player one. */
+/* This machine's first player (input.c) and the script's player one; online, where this machine plays one
+ * fighter, either player's controls work it. */
 static unsigned LocalButtons(void)
 {
-    const bool *keys = SDL_GetKeyboardState(NULL);
-    unsigned buttons = 0;
-    size_t i;
     if (OverlayIsOpen()) {
         return ScriptedButtons(0);
     }
-    for (i = 0; i < sizeof(sKeyMap) / sizeof(sKeyMap[0]); i++) {
-        if (keys[sKeyMap[i].key]) {
-            buttons |= sKeyMap[i].button;
-        }
-    }
-    if (sGamepads[0]) {
-        buttons |= GamepadButtons(sGamepads[0]);
-    }
-    return buttons | ScriptedButtons(0);
+    return InputButtons(0) | (NetplayActive() ? InputButtons(1) : 0) | ScriptedButtons(0);
 }
 
 void HostFillPads(void)
 {
     HostWritePadPort(0, 1, LocalButtons(), NULL);
     /* The second controller is always plugged in, as on a console with two pads: VS mode needs it. */
-    HostWritePadPort(1, 1, (sGamepads[1] ? GamepadButtons(sGamepads[1]) : 0) | ScriptedButtons(1), NULL);
+    HostWritePadPort(1, 1, (OverlayIsOpen() ? 0 : InputButtons(1)) | ScriptedButtons(1), NULL);
 }
 
 /* DOJO_WAV: records everything the SPU produces to a WAV file, for checking sound without listening. */
@@ -276,31 +218,13 @@ void HostQueueAudio(const short *stereo, int frames)
     SDL_PutAudioStreamData(sAudio, stereo, frames * 4);
 }
 
+/* The motor bytes are the game's pulse turned on and off; input.c reads the pulse's strength instead. */
 void HostSetRumbleBuffers(unsigned char *bufA, long lenA, unsigned char *bufB, long lenB)
 {
     (void)bufA;
     (void)lenA;
     (void)bufB;
     (void)lenB;
-}
-
-static void OpenGamepads(void)
-{
-    int count = 0, i, slot = 0;
-    SDL_JoystickID *ids = SDL_GetGamepads(&count);
-    for (i = 0; i < 2; i++) {
-        if (sGamepads[i]) {
-            SDL_CloseGamepad(sGamepads[i]);
-            sGamepads[i] = NULL;
-        }
-    }
-    for (i = 0; ids && i < count && slot < 2; i++) {
-        sGamepads[slot] = SDL_OpenGamepad(ids[i]);
-        if (sGamepads[slot]) {
-            slot++;
-        }
-    }
-    SDL_free(ids);
 }
 
 static void SaveShot(const uint32_t *pixels, int w, int h);
@@ -533,7 +457,7 @@ static void PumpEvents(void)
             break;
         case SDL_EVENT_GAMEPAD_ADDED:
         case SDL_EVENT_GAMEPAD_REMOVED:
-            OpenGamepads();
+            InputDevicesChanged();
             break;
         case SDL_EVENT_KEY_DOWN:
             if (e.key.scancode == SDL_SCANCODE_F11) {
@@ -880,7 +804,7 @@ int main(int argc, char **argv)
             SDL_ResumeAudioStreamDevice(sAudio);
         }
     }
-    OpenGamepads();
+    InputInit();
 
     g_pcTicksPerFrame = ChooseTicksPerFrame();
     {
@@ -926,8 +850,23 @@ int main(int argc, char **argv)
             static int opened;
             const char *at = SDL_getenv("DOJO_MENU_AT");
             if (at && !opened && KernelFieldCount() >= strtoul(at, NULL, 10)) {
+                /* DOJO_MENU_KEYS: keys pressed in it then, by SDL's names, as "Down,Down,Return". */
+                const char *keys = SDL_getenv("DOJO_MENU_KEYS");
                 opened = 1;
                 OverlayOpen();
+                while (keys && *keys) {
+                    char name[32];
+                    size_t len = strcspn(keys, ",");
+                    SDL_Event e;
+                    snprintf(name, sizeof(name), "%.*s", (int)len, keys);
+                    memset(&e, 0, sizeof(e));
+                    e.key.scancode = SDL_GetScancodeFromName(name);
+                    e.type = SDL_EVENT_KEY_DOWN;
+                    OverlayHandleEvent(&e);
+                    e.type = SDL_EVENT_KEY_UP;
+                    OverlayHandleEvent(&e);
+                    keys += len + (keys[len] == ',');
+                }
             }
         }
         {
@@ -996,6 +935,7 @@ int main(int argc, char **argv)
         }
         if (OverlayIsOpen() && !NetplayActive() && !OnlineWantsToWatch()) {
             /* The menu is open: the game waits, its last picture shown under it. */
+            InputUpdateRumble(0);
             Present();
             SDL_Delay(8);
             continue;
@@ -1037,6 +977,7 @@ int main(int argc, char **argv)
             }
             continue;
         }
+        InputUpdateRumble(!OnlineWantsToWatch());
         StateRoundTripTest();
         {
             /* DOJO_HASH_EVERY: logs the simulation's hash every this many fields, to compare runs. */
@@ -1087,6 +1028,7 @@ int main(int argc, char **argv)
         PaceToEmulatedTime();
     }
     OnlineDisconnect();
+    InputShutdown();
     if (sVulkan) {
         VkRendererShutdown();
     }

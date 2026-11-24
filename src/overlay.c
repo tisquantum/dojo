@@ -1,8 +1,8 @@
 /* The options overlay (overlay.h), drawn on the CPU into a transparent picture with SDL's own renderer and
  * debug font, which each renderer lays over the game.
  *
- * Pages: the main page, the options, online play, private matches, a code to type, and a page for waiting
- * (a queue, a room, an opponent connecting). Holding Back (Backspace, or a gamepad's back button) for two
+ * Pages: the main page, the options, the controls, online play, private matches, a code to type, and a page
+ * for waiting (a queue, a room, an opponent connecting). Holding Back (Backspace, or a gamepad's back button) for two
  * seconds goes to the previous page, leaves a queue, or, in an online match, leaves the match. */
 
 #include <stdio.h>
@@ -10,31 +10,44 @@
 #include "overlay.h"
 #include "settings.h"
 #include "online.h"
+#include "input.h"
 
 #define BACK_HOLD_MS 2000
 #define TOAST_MS     5000
 #define STICK_ON     20000
 #define STICK_OFF    12000
+#define CAPTURE_MS   6000
 
-typedef enum Page { PAGE_MAIN, PAGE_OPTIONS, PAGE_ONLINE, PAGE_PRIVATE, PAGE_CODE, PAGE_WAIT, PAGE_COUNT } Page;
+typedef enum Page {
+    PAGE_MAIN, PAGE_OPTIONS, PAGE_CONTROLS, PAGE_ONLINE, PAGE_PRIVATE, PAGE_CODE, PAGE_WAIT, PAGE_COUNT
+} Page;
 
-enum { MAIN_RESUME, MAIN_ONLINE, MAIN_OPTIONS, MAIN_QUIT, MAIN_COUNT };
+enum { MAIN_RESUME, MAIN_ONLINE, MAIN_OPTIONS, MAIN_CONTROLS, MAIN_QUIT, MAIN_COUNT };
 enum {
-    OPT_FPS, OPT_SCALE, OPT_ASPECT, OPT_RENDERER, OPT_DISPLAY, OPT_VSYNC, OPT_VOLUME, OPT_COUNTER, OPT_ANALOG,
-    OPT_BACK, OPT_COUNT
+    OPT_FPS, OPT_SCALE, OPT_ASPECT, OPT_RENDERER, OPT_DISPLAY, OPT_VSYNC, OPT_VOLUME, OPT_COUNTER, OPT_BACK, OPT_COUNT
 };
+/* The controls page: the devices and rumble, then a row of bindings for each console button. */
+enum {
+    CTL_PAD1, CTL_PAD2, CTL_KEYBOARD, CTL_ANALOG, CTL_DEADZONE, CTL_RUMBLE, CTL_HAPTICS, CTL_RESET, CTL_BIND,
+    CTL_BACK = CTL_BIND + SETTINGS_BUTTONS, CTL_COUNT
+};
+#define CTL_COLUMNS (SETTINGS_BIND_SLOTS + 1) /* the bindings, then the row's reset */
 enum { ONLINE_ROW_QUICK, ONLINE_ROW_PRIVATE, ONLINE_ROW_HILL, ONLINE_ROW_PRIVATE_HILL, ONLINE_ROW_BACK, ONLINE_ROW_COUNT };
 enum { PRIVATE_CREATE, PRIVATE_JOIN, PRIVATE_HOST_DIRECT, PRIVATE_JOIN_DIRECT, PRIVATE_BACK, PRIVATE_COUNT };
 enum { CODE_ENTRY, CODE_GO, CODE_BACK, CODE_COUNT };
 enum { WAIT_LEAVE, WAIT_WATCH, WAIT_COUNT };
 
-static const int sRowCounts[PAGE_COUNT] = {MAIN_COUNT, OPT_COUNT, ONLINE_ROW_COUNT, PRIVATE_COUNT, CODE_COUNT, WAIT_COUNT};
-static const char *const sTitles[PAGE_COUNT] = {"DOJO", "OPTIONS", "PLAY ONLINE", "PRIVATE MATCH",
-                                                "ENTER A CODE", "PLAY ONLINE"};
-static const char *const sMainLabels[MAIN_COUNT] = {"Resume", "Play online", "Options", "Quit game"};
+static const int sRowCounts[PAGE_COUNT] = {MAIN_COUNT,    OPT_COUNT,  CTL_COUNT, ONLINE_ROW_COUNT,
+                                           PRIVATE_COUNT, CODE_COUNT, WAIT_COUNT};
+static const char *const sTitles[PAGE_COUNT] = {"DOJO",          "OPTIONS",      "CONTROLS",   "PLAY ONLINE",
+                                                "PRIVATE MATCH", "ENTER A CODE", "PLAY ONLINE"};
+static const char *const sMainLabels[MAIN_COUNT] = {"Resume", "Play online", "Options", "Controls", "Quit game"};
 static const char *const sOptionLabels[OPT_COUNT] = {
-    "Frame rate", "Resolution", "Aspect ratio", "Renderer", "Display", "VSync", "Volume", "Frame counter",
-    "Analog stick", "Back",
+    "Frame rate", "Resolution", "Aspect ratio", "Renderer", "Display", "VSync", "Volume", "Frame counter", "Back",
+};
+static const char *const sControlLabels[CTL_BIND] = {
+    "Player 1 gamepad", "Player 2 gamepad", "Keyboard & mouse", "Left stick moves", "Stick dead zone", "Rumble",
+    "DualSense haptics", "Reset all bindings",
 };
 static const char *const sOnlineLabels[ONLINE_ROW_COUNT] = {"Quick play", "Private match", "King of the Hill",
                                                             "Private hill (by code)", "Back"};
@@ -64,6 +77,9 @@ static Uint64 sToastUntil;
 static char sBanner[160];
 static OnlineState sLastOnline = ONLINE_OFF;
 static int sStickY, sStickX; /* -1, 0, 1: the stick's direction, for a step only on a new push */
+static int sCol;             /* the controls page's column on a binding row */
+static int sScroll;          /* the first line shown of a page too long for the panel */
+static Uint64 sCaptureSince; /* when a binding began waiting for its button, or 0 */
 
 void OverlayInit(const OverlayContext *context, void (*apply)(OverlayChange change))
 {
@@ -91,6 +107,8 @@ static void Go(Page page)
 {
     sPage = page;
     sRow = 0;
+    sScroll = 0;
+    sCaptureSince = 0;
     sDirty = 1;
 }
 
@@ -131,6 +149,10 @@ static void Back(void)
     case PAGE_OPTIONS:
         Go(PAGE_MAIN);
         sRow = MAIN_OPTIONS;
+        break;
+    case PAGE_CONTROLS:
+        Go(PAGE_MAIN);
+        sRow = MAIN_CONTROLS;
         break;
     case PAGE_ONLINE:
         Go(PAGE_MAIN);
@@ -204,9 +226,6 @@ static void ChangeOption(int dir)
     case OPT_COUNTER:
         s->showFps = !s->showFps;
         break;
-    case OPT_ANALOG:
-        s->analog = !s->analog;
-        break;
     case OPT_BACK:
         if (dir == 0) {
             Back();
@@ -214,6 +233,97 @@ static void ChangeOption(int dir)
         return;
     }
     sDirty = 1;
+}
+
+/* Left or right (dir -1 or 1), or confirm (dir 0), on the controls page: on a binding row the arrows move
+ * between the columns and confirm waits for the button to bind, or resets the row. */
+static void ChangeControl(int dir)
+{
+    Settings *s = &g_settings;
+    if (sRow >= CTL_BIND && sRow < CTL_BACK) {
+        if (dir != 0) {
+            sCol = sCol + dir < 0 ? 0 : (sCol + dir >= CTL_COLUMNS ? CTL_COLUMNS - 1 : sCol + dir);
+        } else if (sCol == SETTINGS_BIND_SLOTS) {
+            InputDefaultBindings(sRow - CTL_BIND);
+        } else {
+            sCaptureSince = SDL_GetTicksNS();
+        }
+        sDirty = 1;
+        return;
+    }
+    switch (sRow) {
+    case CTL_PAD1:
+    case CTL_PAD2:
+        InputStepPlayerPad(sRow - CTL_PAD1, dir);
+        break;
+    case CTL_KEYBOARD:
+        s->keyboardPlayer = !s->keyboardPlayer;
+        break;
+    case CTL_ANALOG:
+        s->analog = !s->analog;
+        break;
+    case CTL_DEADZONE:
+        s->deadzone = Step(s->deadzone / 10, dir ? dir : 1, 1, 9) * 10;
+        break;
+    case CTL_RUMBLE:
+        s->rumble = Step(s->rumble / 10, dir ? dir : 1, 0, 10) * 10;
+        break;
+    case CTL_HAPTICS:
+        s->haptics = !s->haptics;
+        break;
+    case CTL_RESET:
+        if (dir == 0) {
+            InputDefaultBindings(-1);
+            Toast("Every binding is back to its default.");
+        }
+        break;
+    case CTL_BACK:
+        if (dir == 0) {
+            Back();
+        }
+        return;
+    }
+    sDirty = 1;
+}
+
+/* The binding being waited for takes an event: a gamepad's for a gamepad column, else a key or a click.
+ * Escape gives up; Delete clears it. */
+static int Capture(const SDL_Event *e)
+{
+    int *slot = &g_settings.binds[sRow - CTL_BIND][sCol];
+    int pad = sCol < INPUT_PAD_SLOTS, binding;
+    if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat &&
+        (e->key.scancode == SDL_SCANCODE_ESCAPE || e->key.scancode == SDL_SCANCODE_F1 ||
+         e->key.scancode == SDL_SCANCODE_DELETE)) {
+        if (e->key.scancode == SDL_SCANCODE_DELETE) {
+            *slot = 0;
+        }
+        sCaptureSince = 0;
+        sDirty = 1;
+        return 1;
+    }
+    if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && SDL_GetTicksNS() - sCaptureSince < 250000000ull) {
+        return 1; /* the stick that chose the cell, still on its way back */
+    }
+    binding = InputBindingFromEvent(e, pad);
+    if (binding) {
+        *slot = binding;
+        sCaptureSince = 0;
+        sDirty = 1;
+        return 1;
+    }
+    /* everything else waits, the other kind of device's buttons too */
+    return e->type == SDL_EVENT_KEY_DOWN || e->type == SDL_EVENT_KEY_UP || e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
+           e->type == SDL_EVENT_GAMEPAD_BUTTON_UP || e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION ||
+           e->type == SDL_EVENT_MOUSE_BUTTON_DOWN || e->type == SDL_EVENT_MOUSE_BUTTON_UP;
+}
+
+static void ClearBinding(void)
+{
+    if (sPage == PAGE_CONTROLS && sRow >= CTL_BIND && sRow < CTL_BACK && sCol < SETTINGS_BIND_SLOTS) {
+        g_settings.binds[sRow - CTL_BIND][sCol] = 0;
+        sDirty = 1;
+    }
 }
 
 static int CodeLength(void)
@@ -295,11 +405,15 @@ static void Change(int dir)
             Go(PAGE_ONLINE);
             break;
         case MAIN_OPTIONS: Go(PAGE_OPTIONS); break;
+        case MAIN_CONTROLS: Go(PAGE_CONTROLS); sCol = 0; break;
         case MAIN_QUIT: SettingsSave(); sApply(OVERLAY_CHANGE_QUIT); break;
         }
         break;
     case PAGE_OPTIONS:
         ChangeOption(dir);
+        break;
+    case PAGE_CONTROLS:
+        ChangeControl(dir);
         break;
     case PAGE_ONLINE:
         if (dir != 0) {
@@ -428,6 +542,9 @@ static void BackUp(void)
 
 int OverlayHandleEvent(const SDL_Event *e)
 {
+    if (sOpen && sCaptureSince && Capture(e)) {
+        return 1;
+    }
     if (e->type == SDL_EVENT_KEY_DOWN || e->type == SDL_EVENT_KEY_UP) {
         SDL_Scancode key = e->key.scancode;
         int down = e->type == SDL_EVENT_KEY_DOWN;
@@ -495,6 +612,7 @@ int OverlayHandleEvent(const SDL_Event *e)
                 Back();
             }
             break;
+        case SDL_SCANCODE_DELETE: ClearBinding(); break;
         default: break;
         }
         return 1;
@@ -530,6 +648,7 @@ int OverlayHandleEvent(const SDL_Event *e)
                 Back();
             }
             break;
+        case SDL_GAMEPAD_BUTTON_NORTH: ClearBinding(); break;
         case SDL_GAMEPAD_BUTTON_START: SetOpen(0); break;
         default: break;
         }
@@ -621,8 +740,36 @@ static void OptionValue(int row, char *out, size_t size)
     case OPT_COUNTER:
         snprintf(out, size, "%s", s->showFps ? "On" : "Off");
         break;
-    case OPT_ANALOG:
-        snprintf(out, size, "%s", s->analog ? "On (the left stick moves)" : "Off");
+    default:
+        out[0] = 0;
+        break;
+    }
+}
+
+static void ControlValue(int row, char *out, size_t size)
+{
+    const Settings *s = &g_settings;
+    switch (row) {
+    case CTL_PAD1:
+    case CTL_PAD2:
+        InputDescribePlayerPad(row - CTL_PAD1, out, size);
+        break;
+    case CTL_KEYBOARD:
+        snprintf(out, size, "Player %d", s->keyboardPlayer + 1);
+        break;
+    case CTL_ANALOG:
+        snprintf(out, size, "%s", s->analog ? "On (as the d-pad)" : "Off");
+        break;
+    case CTL_DEADZONE:
+        snprintf(out, size, "%d%%", s->deadzone);
+        break;
+    case CTL_RUMBLE:
+        snprintf(out, size, s->rumble ? "%d%%" : "Off", s->rumble);
+        break;
+    case CTL_HAPTICS:
+        snprintf(out, size, "%s", !s->haptics      ? "Off (motor rumble)"
+                                  : InputHapticsActive() ? "On (in use)"
+                                                         : "On (a DualSense on a USB cable)");
         break;
     default:
         out[0] = 0;
@@ -681,6 +828,8 @@ static const char *RowLabel(int row, char *buffer, size_t size)
     switch (sPage) {
     case PAGE_MAIN: return sMainLabels[row];
     case PAGE_OPTIONS: return sOptionLabels[row];
+    case PAGE_CONTROLS:
+        return row < CTL_BIND ? sControlLabels[row] : row < CTL_BACK ? INPUT_BUTTONS[row - CTL_BIND].name : "Back";
     case PAGE_ONLINE: return sOnlineLabels[row];
     case PAGE_PRIVATE: return sPrivateLabels[row];
     case PAGE_CODE:
@@ -712,10 +861,82 @@ static const char *RowLabel(int row, char *buffer, size_t size)
     }
 }
 
+/* The controls table's columns: where each starts, and its width. */
+#define CELL_X0 150.0f
+#define CELL_W  98.0f
+#define CELL_GAP 4.0f
+#define RESET_W 48.0f
+#define ROW_H   20.0f
+#define TABLE_HEADER_H 30.0f
+
+static void TextCentred(float x, float y, float w, const char *text, Uint8 r, Uint8 g, Uint8 b)
+{
+    char shown[16];
+    int n = (int)(w / 8) - 1, len = (int)strlen(text);
+    if (len > n) {
+        snprintf(shown, sizeof(shown), "%.*s.", n - 1, text); /* too long: cut, with a dot */
+        text = shown;
+        len = n;
+    }
+    Text(x + (w - 8 * (float)len) / 2, y, 1, text, r, g, b);
+}
+
+static void DrawTableHeader(float left, float y)
+{
+    float x = left + CELL_X0;
+    int i;
+    Text(left + 22, y + 14, 1, "Button", 150, 140, 125);
+    TextCentred(x, y, 2 * CELL_W + CELL_GAP, "Gamepad", 200, 190, 150);
+    TextCentred(x + 2 * (CELL_W + CELL_GAP), y, 2 * CELL_W + CELL_GAP, "Keyboard & mouse", 200, 190, 150);
+    for (i = 0; i < SETTINGS_BIND_SLOTS; i++) {
+        char name[16];
+        snprintf(name, sizeof(name), "Input %d", i % INPUT_PAD_SLOTS + 1);
+        TextCentred(x + (float)i * (CELL_W + CELL_GAP), y + 14, CELL_W, name, 150, 140, 125);
+    }
+}
+
+static void DrawBindingRow(float left, float y, int row, int selected)
+{
+    int slot;
+    float x = left + CELL_X0;
+    for (slot = 0; slot <= SETTINGS_BIND_SLOTS; slot++) {
+        float w = slot == SETTINGS_BIND_SLOTS ? RESET_W : CELL_W;
+        int on = selected && slot == sCol;
+        char name[40];
+        if (on) {
+            Fill(x - 1, y - 6, w + 2, ROW_H, 235, 220, 190, 255);
+            Fill(x, y - 5, w, ROW_H - 2, 200, 60, 40, 255);
+        } else {
+            Fill(x, y - 5, w, ROW_H - 2, 40, 30, 26, 255);
+        }
+        if (slot == SETTINGS_BIND_SLOTS) {
+            snprintf(name, sizeof(name), "Reset");
+        } else if (on && sCaptureSince) {
+            snprintf(name, sizeof(name), "%s", slot < INPUT_PAD_SLOTS ? "Press..." : "Key/click...");
+        } else {
+            InputBindingName(g_settings.binds[row - CTL_BIND][slot], name, sizeof(name));
+        }
+        {
+            int none = slot < SETTINGS_BIND_SLOTS && !g_settings.binds[row - CTL_BIND][slot] && !on;
+            TextCentred(x, y, w, name, on ? 255 : (none ? 120 : 225), on ? 245 : (none ? 112 : 215),
+                        on ? 230 : (none ? 100 : 195));
+        }
+        x += w + CELL_GAP;
+    }
+}
+
+/* The height of a page's row, with the controls table's header before its first binding. */
+static float RowHeight(int row)
+{
+    return sPage == PAGE_CONTROLS && row == CTL_BIND ? ROW_H + TABLE_HEADER_H : ROW_H;
+}
+
 static void DrawMenu(void)
 {
-    const float panelW = 470, panelH = 320, left = (OVERLAY_WIDTH - panelW) / 2, top = (OVERLAY_HEIGHT - panelH) / 2;
-    float y;
+    const int wide = sPage == PAGE_CONTROLS;
+    const float panelW = wide ? 620 : 470, panelH = wide ? 350 : 320;
+    const float left = (OVERLAY_WIDTH - panelW) / 2, top = (OVERLAY_HEIGHT - panelH) / 2;
+    float y, bottom = top + panelH - 30;
     int row;
     const char *hint;
     Fill(0, 0, OVERLAY_WIDTH, OVERLAY_HEIGHT, 0, 0, 0, 110);
@@ -743,29 +964,64 @@ static void DrawMenu(void)
         }
         y += 8;
     }
-    for (row = 0; row < sRowCounts[sPage]; row++) {
+    {
+        /* A page longer than the panel scrolls to keep the chosen row in sight. */
+        float space = bottom - y, used = 0;
+        if (sRow < sScroll) {
+            sScroll = sRow;
+        }
+        for (row = sScroll; row <= sRow; row++) {
+            used += RowHeight(row);
+        }
+        while (used > space && sScroll < sRow) {
+            used -= RowHeight(sScroll++);
+        }
+        if (sScroll > 0) {
+            Text(left + panelW - 30, y - 12, 1, "^", 200, 190, 150);
+        }
+    }
+    for (row = sScroll; row < sRowCounts[sPage] && y + RowHeight(row) <= bottom; row++) {
         char value[96], label[64];
         int selected = row == sRow;
         int locked = sPage == PAGE_OPTIONS &&
                      ((row == OPT_FPS && sContext.online) || (row == OPT_SCALE && !sContext.vulkan));
+        int binding = sPage == PAGE_CONTROLS && row >= CTL_BIND && row < CTL_BACK;
+        if (sPage == PAGE_CONTROLS && row == CTL_BIND) {
+            DrawTableHeader(left, y);
+            y += TABLE_HEADER_H;
+        }
         if (selected) {
-            Fill(left + 10, y - 5, panelW - 20, 18, 120, 30, 22, 255);
+            Fill(left + 10, y - 5, binding ? CELL_X0 - 14 : panelW - 20, 18, 120, 30, 22, 255);
         }
         Text(left + 22, y, 1, RowLabel(row, label, sizeof(label)), selected ? 255 : 210, selected ? 245 : 200,
              selected ? 230 : 185);
-        if (sPage == PAGE_OPTIONS) {
-            OptionValue(row, value, sizeof(value));
+        if (binding) {
+            DrawBindingRow(left, y, row, selected);
+        } else if (sPage == PAGE_OPTIONS || sPage == PAGE_CONTROLS) {
+            if (sPage == PAGE_OPTIONS) {
+                OptionValue(row, value, sizeof(value));
+            } else {
+                ControlValue(row, value, sizeof(value));
+            }
             if (value[0]) {
                 char shown[110];
                 snprintf(shown, sizeof(shown), selected && !locked ? "< %s >" : "  %s", value);
-                Text(left + 160, y, 1, shown, locked ? 130 : 240, locked ? 125 : 210, locked ? 120 : 150);
+                Text(left + (wide ? 190 : 160), y, 1, shown, locked ? 130 : 240, locked ? 125 : 210,
+                     locked ? 120 : 150);
             }
         }
-        y += 20;
+        y += ROW_H;
+    }
+    if (row < sRowCounts[sPage]) {
+        Text(left + panelW - 30, bottom - 4, 1, "v", 200, 190, 150);
     }
     hint = sPage == PAGE_WAIT   ? "Hold Back (Backspace) for 2 seconds to leave"
            : sPage == PAGE_CODE ? "Type letters, or up/down and right   Enter: join"
-                                : "Arrows: choose   Enter: select   Hold Back: go back";
+           : sCaptureSince      ? (sCol < INPUT_PAD_SLOTS ? "Press a gamepad button or push a stick   Esc: cancel   Del: clear"
+                                                          : "Press a key or click a mouse button   Esc: cancel   Del: clear")
+           : sPage == PAGE_CONTROLS && sRow >= CTL_BIND && sRow < CTL_BACK
+               ? "Enter/A: bind   Del/Y: clear   Arrows: choose   Hold Back: go back"
+               : "Arrows: choose   Enter: select   Hold Back: go back";
     Text(left + 20, top + panelH - 22, 1, hint, 150, 140, 125);
 }
 
@@ -844,6 +1100,10 @@ static void Update(void)
         snprintf(sBanner, sizeof(sBanner), "%s", banner);
         sDirty = 1;
     }
+    if (sCaptureSince && SDL_GetTicksNS() - sCaptureSince > (Uint64)CAPTURE_MS * 1000000ull) {
+        sCaptureSince = 0; /* nothing came: the binding stays as it was */
+        sDirty = 1;
+    }
     if (sBackSince && !sBackDone) {
         /* With the menu open the hold goes back; in a match it leaves it; watching, it stops watching; otherwise
          * Back is the game's alone. */
@@ -866,7 +1126,19 @@ static void Update(void)
             sDirty = 1;
         }
     }
-    if (sOpen && sPage != PAGE_MAIN && sPage != PAGE_OPTIONS) {
+    if (sOpen && sPage == PAGE_CONTROLS) {
+        /* gamepads come and go, and haptics start, while the page is up */
+        static char last[160];
+        char now[160];
+        ControlValue(CTL_PAD1, now, 80);
+        ControlValue(CTL_HAPTICS, now + strlen(now), 80);
+        ControlValue(CTL_PAD2, now + strlen(now), 160 - strlen(now));
+        if (strcmp(now, last) != 0) {
+            snprintf(last, sizeof(last), "%s", now);
+            sDirty = 1;
+        }
+    }
+    if (sOpen && sPage != PAGE_MAIN && sPage != PAGE_OPTIONS && sPage != PAGE_CONTROLS) {
         /* the status line changes as the server answers */
         static char lastStatus[200];
         char status[200];
