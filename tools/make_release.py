@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Make the release zip: dist/Dojo-<version>-windows.zip.
 
-It holds Dojo.exe (the launcher, packaged with PyInstaller), this repository's files and the bundled toolchain
-(tools/fetch_toolchain.py), so a player unpacks it, opens Dojo.exe, points it at their own disc and plays:
-nothing to install. No game data is in it: the game is built on the player's machine from the decompilation
-(downloaded by the launcher) and their disc.
+It holds Dojo.exe (the launcher, packaged with PyInstaller), this repository's files, the bundled toolchain
+(tools/fetch_toolchain.py) and the game's decompiled source (decomp/, the commit the launcher pins, fetched
+from the fork), so a player unpacks it, opens Dojo.exe, points it at their own disc and plays: nothing to
+install or download. No game data is in it: the game is built on the player's machine from that source and
+their disc.
 
     python tools/make_release.py            (needs PyInstaller: pip install pyinstaller)
 """
@@ -14,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.request
 import zipfile
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -37,13 +39,42 @@ built with, unmodified except that parts the build doesn't use were left out. Ea
 `Dojo.exe` is the launcher packaged with PyInstaller, which includes Python and Tcl/Tk (PSF and BSD-style
 licences).
 
-Bushido Blade is a trademark of its owners. No part of the game is included; you need your own copy.
+`decomp` is the decompiled source of Bushido Blade with Dojo's changes (github.com/tisquantum/bushido, branch
+`dojo`, a fork of github.com/virtualonno/bushido). It isn't covered by Dojo's MIT licence.
+
+Bushido Blade is a trademark of its owners. No game data is included; you need your own copy of the game.
 """
 
 
-def version():
+def launcher_constant(name):
     text = open(os.path.join(HERE, "launcher.pyw"), encoding="utf-8").read()
-    return re.search(r'DOJO_VERSION = "([^"]+)"', text).group(1)
+    return re.search(r'%s = "([^"]+)"' % name, text).group(1)
+
+
+def version():
+    return launcher_constant("DOJO_VERSION")
+
+
+def add_decomp(dest):
+    """The decompiled source at the commit the launcher pins, from the fork, as decomp/ (stamped like a download)."""
+    commit = launcher_constant("DECOMP_COMMIT")
+    archive = os.path.join(DIST, "decomp-%s.zip" % commit)
+    if not os.path.isfile(archive):
+        url = "https://github.com/tisquantum/bushido/archive/%s.zip" % commit
+        print("downloading", url, flush=True)
+        with urllib.request.urlopen(url) as response, open(archive + ".part", "wb") as out:
+            shutil.copyfileobj(response, out)
+        os.replace(archive + ".part", archive)
+    top = "bushido-%s/" % commit
+    with zipfile.ZipFile(archive) as z:
+        for info in z.infolist():
+            if info.filename.startswith(top) and not info.filename.endswith("/"):
+                target = os.path.join(dest, info.filename[len(top):])
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with z.open(info) as src, open(target, "wb") as out:
+                    shutil.copyfileobj(src, out)
+    with open(os.path.join(dest, ".dojo-decomp"), "w") as f:
+        f.write(commit + "\n")
 
 
 def repository_files():
@@ -79,6 +110,8 @@ def main():
     print("copying the toolchain", flush=True)
     shutil.copytree(toolchain, os.path.join(stage, "toolchain"),
                     ignore=shutil.ignore_patterns("_downloads", "__pycache__"))
+    print("adding the game's decompiled source", flush=True)
+    add_decomp(os.path.join(stage, "decomp"))
     with open(os.path.join(stage, "THIRD_PARTY.md"), "w", encoding="utf-8") as f:
         f.write(THIRD_PARTY)
 

@@ -20,7 +20,7 @@
 
 Dojo is built from the game's decompiled source, with things the console never had: real frame rates above the
 game's 30 (60, 120, 144, 165 and beyond: the game's own logic runs more often, nothing is interpolated), any
-screen shape from 4:3 to 32:9, and online play with rollback netcode: quick play, private matches and King of
+aspect ratio from 4:3 to 32:9, and online play with rollback netcode: quick play, private matches and King of
 the Hill. Questions, matches and bug reports: join the [Discord](https://discord.gg/gbU9rDZRh).
 
 **No game data is included.** You play with your own copy of the game; the build and the game read it from your
@@ -36,10 +36,8 @@ disc image. Don't share builds of the game: `dojo.exe` contains the game's code.
 - **Your own disc image of Bushido Blade (USA)**, ripped as `.bin` + `.cue` (a raw 2352-byte-sector image;
   an `.iso` won't work). The file names don't matter. The launcher's **Verify disc** checks it against the
   known good copy (SHA-256 `c5cba1e3e8bc68f15e32492907ac37add7f8e8d3e10ddb36742a729ce1a970bf`).
-- **An internet connection the first time**, to download the game's decompiled source (a few MB).
-
-Nothing else: the release carries every tool it builds with. The game itself is built on your PC, from the
-decompiled source and your disc, because a finished game can't be shared.
+Nothing else: the release carries every tool it builds with and the game's decompiled source. The game itself
+is built on your PC from that source and your disc, because a finished game can't be shared.
 
 ### Playing with the launcher
 
@@ -48,10 +46,10 @@ decompiled source and your disc, because a finished game can't be shared.
 2. Open **`Dojo.exe`**. Windows SmartScreen may warn about an unsigned app: **More info → Run anyway**.
 3. **Game** tab: under *Disc image*, choose your `.cue`, `.bin` or the folder holding them (**File...** or
    **Folder...**). Optionally press **Verify disc**.
-4. **Settings** tab: pick your frame rate, screen shape, resolution, full screen and so on, and your name for
+4. **Settings** tab: pick your frame rate, aspect ratio, resolution, full screen and so on, and your name for
    online play. Everything saves as you change it.
-5. Press **Play**. The first time it downloads the decompiled source and builds the game (a few minutes; the
-   **Build** tab shows progress). After that, Play starts the game straight away.
+5. Press **Play**. The first time it builds the game (a few minutes; the **Build** tab shows progress). After
+   that, Play starts the game straight away.
 
 If the game closes with an error, its last output appears in the **Build** tab, and **Open game log** opens
 `dojo.log`. Your saves are in `saves/` and your settings in `build/dojo.ini`; keep those two when moving to a
@@ -63,13 +61,14 @@ In the release folder (or a checkout with the toolchain, see below):
 
 ```
 toolchain\cmakein\cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ^
-      -DDOJO_DECOMP_DIR=<decompilation folder> -DDOJO_DISC=<your disc .bin>
+      -DDOJO_DECOMP_DIR=decomp -DDOJO_DISC=<your disc .bin>
 toolchain\cmakein\cmake --build build
 build\dojo.exe "<your disc .bin>"
 ```
 
-The decompilation is the `dojo` branch of [tisquantum/bushido](https://github.com/tisquantum/bushido/tree/dojo)
-(the launcher fetches the exact commit its version was made with). Started without a disc path, `dojo.exe`
+The release's `decomp` folder is the `dojo` branch of
+[tisquantum/bushido](https://github.com/tisquantum/bushido/tree/dojo) at the commit that version was made with
+(in a checkout, the launcher downloads it). Started without a disc path, `dojo.exe`
 looks for `game_files/Bushido Blade (USA).bin` in the folder it is started from or the two above it.
 
 ### Controls
@@ -95,7 +94,7 @@ The launcher's Settings tab and the in-game options menu (**F1**) change the sam
 | Key | Values | |
 |---|---|---|
 | `fps` | `0` (match the display) or 30 to 480 in steps of 30 | The game's rate. `30` is the original exactly. Online, both players run the higher of their two rates. |
-| `aspect` | `auto`, `4:3`, `16:10`, `16:9`, `21:9`, `24:10`, `32:9` | Screen shape; `auto` matches the display. |
+| `aspect` | `auto`, `4:3`, `16:10`, `16:9`, `21:9`, `24:10`, `32:9` | Aspect ratio; `auto` matches the display. |
 | `scale` | 1 to 8 | Resolution as a multiple of the console's 320x240 (Vulkan only). |
 | `software` | 0 / 1 | 1: the software (CPU) renderer instead of Vulkan. |
 | `fullscreen`, `vsync`, `show_fps` | 0 / 1 | Full screen, v-sync, frame counter. |
@@ -107,7 +106,7 @@ The launcher's Settings tab and the in-game options menu (**F1**) change the sam
 | `p2p_port` | UDP port, default 7778 | The port a direct match is hosted on. |
 | `watch_hill` | 0 / 1 | Watch King of the Hill fights while waiting in line. |
 
-Frame rate, resolution, full screen, v-sync, volume and the frame counter apply at once; screen shape and
+Frame rate, resolution, full screen, v-sync, volume and the frame counter apply at once; aspect ratio and
 renderer on the next start.
 
 ### Online

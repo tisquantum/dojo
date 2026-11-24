@@ -1,8 +1,8 @@
 """Dojo launcher: point it at your disc image, set the options, build and play.
 
-In a release it is Dojo.exe beside the source and the bundled toolchain (toolchain/); in a checkout, run
-`python launcher.pyw` after `python tools/fetch_toolchain.py`. It downloads the decompilation the game is built
-from (or uses one you choose), builds the game with the bundled tools, and starts it. It keeps its own choices
+In a release it is Dojo.exe beside the source, the game's decompiled source (decomp/) and the bundled toolchain
+(toolchain/); in a checkout, run `python launcher.pyw` after `python tools/fetch_toolchain.py` (Play downloads
+the decompiled source there). It builds the game with the bundled tools and starts it. It keeps its own choices
 in launcher.json, writes the game's options to build/dojo.ini (the file the in-game options menu, F1, changes
 too), and runs the game in this folder, so the memory-card saves live in saves/ here.
 """
@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -52,6 +53,153 @@ ASPECT_NAMES = ["Match my display", "4:3 (original)", "16:10", "16:9", "21:9", "
 FPS_VALUES = [0] + list(range(30, 481, 30))
 SCALE_NAMES = ["1x (320x240)", "2x (640x480)", "3x (960x720)", "4x (1280x960)", "5x (1600x1200)",
                "6x (1920x1440)", "7x (2240x1680)", "8x (2560x1920)"]
+
+
+# The look: sumi ink and washi paper, with the crimson of the logo's sword cut.
+INK = "#14110f"        # the window
+PANEL = "#1c1815"      # the pages
+FIELD = "#28221d"      # inputs and buttons
+FIELD_HOVER = "#352d26"
+LINE = "#3d342b"
+PAPER = "#ece4d4"      # text
+MUTED = "#a39684"
+DIM = "#655a4e"
+CRIMSON = "#e5383b"
+CRIMSON_DARK = "#b3242b"
+GOOD = "#8fbf73"
+WARN = "#e3a857"
+BAD = "#ff7a6e"
+
+# The logo's letters (tools/make_logo.py): outlines and holes, 150 x 140 units each.
+LOGO_LETTERS = {
+    "D": "M0,0 H100 L150,50 V90 L100,140 H0 Z M34,34 V106 H86 L116,76 V64 L86,34 Z",
+    "O": "M40,0 H110 L150,40 V100 L110,140 H40 L0,100 V40 Z M52,34 L34,52 V88 L52,106 H98 L116,88 V52 L98,34 Z",
+    "J": "M50,0 H150 V100 L110,140 H40 L0,100 V78 H34 V88 L52,106 H98 L116,88 V34 H50 Z",
+}
+
+
+def logo_shapes(path):
+    """The polygons of a logo letter's path (M, H, V, L and Z only): the outline first, then its hole."""
+    shapes, points, x, y = [], [], 0.0, 0.0
+    tokens = re.findall(r"[MLHVZ]|-?[0-9.]+", path)
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "M":
+            if points:
+                shapes.append(points)
+            x, y = float(tokens[i + 1]), float(tokens[i + 2])
+            points = [(x, y)]
+            i += 3
+        elif t == "L":
+            x, y = float(tokens[i + 1]), float(tokens[i + 2])
+            points.append((x, y))
+            i += 3
+        elif t == "H":
+            x = float(tokens[i + 1])
+            points.append((x, y))
+            i += 2
+        elif t == "V":
+            y = float(tokens[i + 1])
+            points.append((x, y))
+            i += 2
+        else:   # Z
+            i += 1
+    if points:
+        shapes.append(points)
+    return shapes
+
+
+def draw_logo(canvas, left, top, scale):
+    """DOJO with the sword cut through the last O, as on the README."""
+    for n, letter in enumerate("DOJO"):
+        ox = left + n * (150 + 34) * scale
+        for k, shape in enumerate(logo_shapes(LOGO_LETTERS[letter])):
+            flat = [v for px, py in shape for v in (ox + px * scale, top + py * scale)]
+            canvas.create_polygon(flat, fill=PAPER if k == 0 else INK, outline="")
+    lx = left + 3 * (150 + 34) * scale
+    cut = (lx - 22 * scale, top + 160 * scale, lx + 172 * scale, top - 20 * scale)
+    canvas.create_line(*cut, fill=INK, width=max(3, 22 * scale))
+    canvas.create_line(*cut, fill=CRIMSON, width=max(2, 6 * scale), capstyle="round")
+
+
+def apply_theme(root):
+    root.configure(background=INK)
+    style = ttk.Style(root)
+    style.theme_use("clam")
+    base = ("Segoe UI", 10)
+    style.configure(".", background=PANEL, foreground=PAPER, fieldbackground=FIELD, bordercolor=LINE,
+                    lightcolor=PANEL, darkcolor=PANEL, troughcolor=FIELD, focuscolor=CRIMSON,
+                    selectbackground=CRIMSON, selectforeground=PAPER, insertcolor=PAPER, font=base)
+    style.configure("TFrame", background=PANEL)
+    style.configure("Ink.TFrame", background=INK)
+    style.configure("TLabel", background=PANEL, foreground=PAPER)
+    style.configure("Ink.TLabel", background=INK, foreground=MUTED)
+    style.configure("Kanji.TLabel", background=INK, foreground=CRIMSON_DARK, font=("Yu Gothic UI", 20, "bold"))
+    style.configure("Tagline.TLabel", background=INK, foreground=MUTED, font=("Segoe UI", 9))
+    style.configure("Section.TLabel", background=PANEL, foreground=CRIMSON, font=("Segoe UI", 10, "bold"))
+    style.configure("Sub.TLabel", background=PANEL, foreground=MUTED)
+    style.configure("Good.TLabel", background=PANEL, foreground=GOOD)
+    style.configure("Bad.TLabel", background=PANEL, foreground=BAD)
+    style.configure("Warn.TLabel", background=PANEL, foreground=WARN)
+
+    style.configure("TNotebook", background=INK, borderwidth=0, tabmargins=(12, 6, 12, 0))
+    style.configure("TNotebook.Tab", background=INK, foreground=MUTED, padding=(18, 7), borderwidth=1,
+                    bordercolor=LINE, lightcolor=INK, darkcolor=INK, font=("Segoe UI", 10, "bold"))
+    style.map("TNotebook.Tab", background=[("selected", PANEL), ("active", FIELD)],
+              foreground=[("selected", PAPER), ("active", PAPER)],
+              lightcolor=[("selected", CRIMSON)], bordercolor=[("selected", LINE)])
+
+    style.configure("TButton", background=FIELD, foreground=PAPER, bordercolor=LINE, padding=(12, 5),
+                    focusthickness=0)
+    style.map("TButton", background=[("disabled", PANEL), ("pressed", CRIMSON_DARK), ("active", FIELD_HOVER)],
+              foreground=[("disabled", DIM)], bordercolor=[("active", CRIMSON)])
+    style.configure("Play.TButton", background=CRIMSON, foreground="#ffffff", bordercolor=CRIMSON,
+                    font=("Segoe UI", 12, "bold"), padding=(28, 8))
+    style.map("Play.TButton", background=[("disabled", FIELD), ("pressed", CRIMSON_DARK), ("active", "#f04a4d")],
+              foreground=[("disabled", DIM)], bordercolor=[("disabled", LINE)])
+
+    style.configure("TEntry", fieldbackground=FIELD, foreground=PAPER, bordercolor=LINE, padding=4)
+    style.map("TEntry", fieldbackground=[("readonly", PANEL)], foreground=[("readonly", MUTED)],
+              bordercolor=[("focus", CRIMSON)])
+    style.configure("TCombobox", fieldbackground=FIELD, background=FIELD, foreground=PAPER, arrowcolor=PAPER,
+                    bordercolor=LINE, padding=3)
+    style.map("TCombobox", fieldbackground=[("readonly", FIELD)], foreground=[("readonly", PAPER)],
+              selectbackground=[("readonly", FIELD)], selectforeground=[("readonly", PAPER)],
+              background=[("active", FIELD_HOVER)], bordercolor=[("focus", CRIMSON)])
+    root.option_add("*TCombobox*Listbox.background", FIELD)
+    root.option_add("*TCombobox*Listbox.foreground", PAPER)
+    root.option_add("*TCombobox*Listbox.selectBackground", CRIMSON)
+    root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+    root.option_add("*TCombobox*Listbox.font", base)
+
+    style.configure("TCheckbutton", background=PANEL, foreground=PAPER, indicatorbackground=FIELD,
+                    indicatorforeground=PAPER, focusthickness=0)
+    style.map("TCheckbutton", background=[("active", PANEL)],
+              indicatorbackground=[("selected", CRIMSON), ("active", FIELD_HOVER)])
+    style.configure("Horizontal.TScale", background=CRIMSON, lightcolor=CRIMSON, darkcolor=CRIMSON,
+                    bordercolor=CRIMSON_DARK, troughcolor=FIELD, sliderlength=14, gripcount=0)
+    style.map("Horizontal.TScale", background=[("active", "#f04a4d")])
+    style.configure("Horizontal.TProgressbar", background=CRIMSON, troughcolor=FIELD, bordercolor=LINE)
+    style.configure("TSeparator", background=LINE)
+    style.configure("Vertical.TScrollbar", background=FIELD_HOVER, lightcolor=FIELD_HOVER, darkcolor=FIELD_HOVER,
+                    troughcolor="#0e0c0a", arrowcolor=MUTED, bordercolor=PANEL, gripcount=0)
+    style.map("Vertical.TScrollbar", background=[("active", LINE)], lightcolor=[("active", LINE)],
+              darkcolor=[("active", LINE)])
+
+
+def dark_title_bar(root):
+    """Windows 10/11: a dark title bar to match."""
+    try:
+        import ctypes
+        root.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+        on = ctypes.c_int(1)
+        for attribute in (20, 19):   # DWMWA_USE_IMMERSIVE_DARK_MODE (and its pre-20H1 number)
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(on), 4) == 0:
+                break
+    except (AttributeError, OSError):
+        pass
 
 
 def default_name():
@@ -196,33 +344,34 @@ class Launcher:
         self.config = self.load_config()
 
         root.title("Dojo %s" % DOJO_VERSION)
-        root.minsize(720, 560)
-        style = ttk.Style()
-        if "vista" in style.theme_names():
-            style.theme_use("vista")
-        style.configure("Title.TLabel", font=("Segoe UI", 22, "bold"))
-        style.configure("Sub.TLabel", foreground="#666")
-        style.configure("Play.TButton", font=("Segoe UI", 11, "bold"), padding=(18, 6))
-        style.configure("Good.TLabel", foreground="#1a7f37")
-        style.configure("Bad.TLabel", foreground="#c0392b")
-        style.configure("Warn.TLabel", foreground="#9a6700")
+        root.minsize(760, 620)
+        apply_theme(root)
+        dark_title_bar(root)
 
-        header = ttk.Frame(root, padding=(16, 12, 16, 4))
+        header = ttk.Frame(root, style="Ink.TFrame", padding=(20, 14, 20, 6))
         header.pack(fill="x")
-        ttk.Label(header, text="DOJO", style="Title.TLabel").pack(side="left")
-        ttk.Label(header, text="   Bushido Blade for PC: high frame rates, any screen shape, online play",
-                  style="Sub.TLabel").pack(side="left", pady=(10, 0))
+        logo = tk.Canvas(header, width=250, height=58, background=INK, highlightthickness=0)
+        logo.pack(side="left")
+        draw_logo(logo, 4, 9, 0.29)
+        words = ttk.Frame(header, style="Ink.TFrame")
+        words.pack(side="left", padx=(16, 0), pady=(6, 0))
+        ttk.Label(words, text="B U S H I D O   B L A D E   ·   P C", style="Ink.TLabel",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        ttk.Label(words, text="High frame rates  ·  any aspect ratio  ·  online rollback play",
+                  style="Tagline.TLabel").pack(anchor="w", pady=(2, 0))
+        ttk.Label(header, text="武士道", style="Kanji.TLabel").pack(side="right")
+        tk.Frame(root, background=CRIMSON_DARK, height=2).pack(fill="x", padx=20)
 
         self.tabs = ttk.Notebook(root)
-        self.tabs.pack(fill="both", expand=True, padx=12, pady=6)
+        self.tabs.pack(fill="both", expand=True, padx=12, pady=(8, 6))
         self.build_game_tab()
         self.build_settings_tab()
         self.build_build_tab()
         self.build_controls_tab()
 
-        bar = ttk.Frame(root, padding=(16, 6, 16, 12))
+        bar = ttk.Frame(root, style="Ink.TFrame", padding=(20, 6, 20, 14))
         bar.pack(fill="x")
-        self.status = ttk.Label(bar, text="")
+        self.status = ttk.Label(bar, text="", style="Ink.TLabel")
         self.status.pack(side="left", fill="x", expand=True)
         self.play_button = ttk.Button(bar, text="Play", style="Play.TButton", command=self.play)
         self.play_button.pack(side="right")
@@ -277,7 +426,7 @@ class Launcher:
         self.tabs.add(tab, text="  Game  ")
         tab.columnconfigure(1, weight=1)
 
-        ttk.Label(tab, text="Disc image", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(tab, text="Disc image", style="Section.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(tab, text="Your own copy of Bushido Blade (USA), ripped as .bin/.cue. Pick the .cue, the "
                   ".bin, or the folder they're in; the file names don't matter.", style="Sub.TLabel",
                   wraplength=640).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 6))
@@ -296,28 +445,13 @@ class Launcher:
 
         ttk.Separator(tab).grid(row=5, column=0, columnspan=4, sticky="ew", pady=16)
 
-        ttk.Label(tab, text="Decompilation folder", font=("Segoe UI", 10, "bold")).grid(row=6, column=0,
-                                                                                         sticky="w")
-        ttk.Label(tab, text="The decompiled source of Bushido Blade, with Dojo's changes, that the game is built "
-                  "from. It isn't shipped with Dojo: Download fetches this version's copy from GitHub.",
-                  style="Sub.TLabel", wraplength=640).grid(row=7, column=0, columnspan=4, sticky="w", pady=(0, 6))
-        self.decomp_var = tk.StringVar(value=self.config["decomp"])
-        ttk.Entry(tab, textvariable=self.decomp_var).grid(row=8, column=0, columnspan=2, sticky="ew")
-        self.download_button = ttk.Button(tab, text="Download", command=self.download_decomp)
-        self.download_button.grid(row=8, column=2, padx=(6, 0))
-        ttk.Button(tab, text="Folder...", command=self.pick_decomp).grid(row=8, column=3, padx=(6, 0))
-        self.decomp_var.trace_add("write", lambda *_: self.refresh_decomp())
-        self.decomp_info = ttk.Label(tab, text="")
-        self.decomp_info.grid(row=9, column=0, columnspan=4, sticky="w", pady=(6, 0))
-
-        ttk.Separator(tab).grid(row=10, column=0, columnspan=4, sticky="ew", pady=16)
         self.exe_info = ttk.Label(tab, text="")
-        self.exe_info.grid(row=11, column=0, columnspan=4, sticky="w")
+        self.exe_info.grid(row=6, column=0, columnspan=4, sticky="w")
         self.build_first_var = tk.BooleanVar(value=self.config["build_first"])
         ttk.Checkbutton(tab, text="Build before playing (picks up changes; quick when nothing changed)",
                         variable=self.build_first_var,
                         command=lambda: self.set_config("build_first", self.build_first_var.get())
-                        ).grid(row=12, column=0, columnspan=4, sticky="w", pady=(8, 0))
+                        ).grid(row=7, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
     def set_config(self, key, value):
         self.config[key] = value
@@ -369,27 +503,28 @@ class Launcher:
         self.set_config("decomp", path)
         commit = decomp_commit(path) if path else None
         if self.decomp_ok() and commit and commit != DECOMP_COMMIT:
-            self.decomp_info.configure(text="This is another version's decompilation: press Download for this "
-                                       "version's.", style="Warn.TLabel")
+            self.decomp_info.configure(text="Another version's source: Play downloads this version's.",
+                                       style="Warn.TLabel")
         elif self.decomp_ok():
-            self.decomp_info.configure(text="Ready." if commit else "Found the decompilation (your own copy).",
-                                       style="Good.TLabel")
+            self.decomp_info.configure(text="Included with this release." if commit else
+                                       "Your own copy of the decompilation.", style="Good.TLabel")
         elif path and os.path.isfile(os.path.join(path, "src", "main.c")):
             self.decomp_info.configure(text="This decompilation is missing the port's changes "
                                        "(include/substep.h).", style="Bad.TLabel")
         elif path and os.path.normcase(os.path.abspath(path)) == os.path.normcase(DECOMP_DIR) and \
                 not os.path.isdir(path):
-            self.decomp_info.configure(text="Not downloaded yet: press Download (a few MB).",
-                                       style="Warn.TLabel")
+            self.decomp_info.configure(text="Not here (a checkout of the repository): Play downloads this "
+                                       "version's copy from GitHub (a few MB).", style="Sub.TLabel")
         else:
             self.decomp_info.configure(text="Not the decompilation (no src/main.c in it).",
                                        style="Bad.TLabel" if path else "Warn.TLabel")
         if hasattr(self, "play_button"):
             self.update_buttons()
 
-    def download_decomp(self):
+    def download_decomp(self, then_play=False):
         if self.busy:
             return
+        self.download_then_play = then_play
         dest = DECOMP_DIR
         if os.path.isdir(dest) and os.listdir(dest) and decomp_commit(dest) is None:
             messagebox.showwarning("Dojo", "%s holds files the launcher didn't download; move them away first."
@@ -398,6 +533,7 @@ class Launcher:
         self.busy = "download"
         self.update_buttons()
         self.decomp_info.configure(text="Downloading...", style="TLabel")
+        self.status.configure(text="Downloading the game's source...")
 
         def work():
             part = dest + ".zip.part"
@@ -476,7 +612,7 @@ class Launcher:
         tab.columnconfigure(3, weight=1)
 
         def section(row, col, title):
-            ttk.Label(tab, text=title, font=("Segoe UI", 10, "bold")).grid(
+            ttk.Label(tab, text=title, style="Section.TLabel").grid(
                 row=row, column=col, columnspan=2, sticky="w", pady=(10 if row else 0, 4))
 
         def combo(row, col, label, key, names, choices):
@@ -508,7 +644,7 @@ class Launcher:
         section(0, 0, "Display")
         combo(1, 0, "Frame rate", "fps", ["Match my display"] + ["%d fps" % f for f in FPS_VALUES[1:]],
               FPS_VALUES)
-        combo(2, 0, "Screen shape", "aspect", ASPECT_NAMES, ASPECTS)
+        combo(2, 0, "Aspect ratio", "aspect", ASPECT_NAMES, ASPECTS)
         combo(3, 0, "Renderer", "software", ["Vulkan (GPU)", "Software (CPU)"], [0, 1])
         combo(4, 0, "Resolution (Vulkan)", "scale", SCALE_NAMES, list(range(1, 9)))
         check(5, 0, "Full screen  (F11 switches in game)", "fullscreen")
@@ -626,15 +762,29 @@ class Launcher:
         tab = ttk.Frame(self.tabs, padding=16)
         self.tabs.add(tab, text="  Build  ")
         tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(3, weight=1)
+        tab.rowconfigure(4, weight=1)
 
-        ttk.Label(tab, text="Build tools", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(tab, text="Build tools", style="Section.TLabel").grid(row=0, column=0, sticky="w")
         self.tool_frame = ttk.Frame(tab)
         self.tool_frame.grid(row=1, column=0, sticky="ew", pady=(4, 8))
         self.tool_frame.columnconfigure(1, weight=1)
 
+        # The game's decompiled source: downloaded by Play, so a player never has to touch this.
+        source = ttk.Frame(tab)
+        source.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        source.columnconfigure(1, weight=1)
+        ttk.Label(source, text="Game source", width=12).grid(row=0, column=0, sticky="w")
+        self.decomp_var = tk.StringVar(value=self.config["decomp"])
+        ttk.Entry(source, textvariable=self.decomp_var).grid(row=0, column=1, sticky="ew")
+        self.download_button = ttk.Button(source, text="Download", command=self.download_decomp)
+        self.download_button.grid(row=0, column=2, padx=(6, 0))
+        ttk.Button(source, text="Folder...", command=self.pick_decomp).grid(row=0, column=3, padx=(6, 0))
+        self.decomp_info = ttk.Label(source, text="", wraplength=640)
+        self.decomp_info.grid(row=1, column=1, columnspan=3, sticky="w", pady=(4, 0))
+        self.decomp_var.trace_add("write", lambda *_: self.refresh_decomp())
+
         options = ttk.Frame(tab)
-        options.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        options.grid(row=3, column=0, sticky="ew", pady=(0, 6))
         ttk.Label(options, text="Build type").pack(side="left")
         self.build_type = tk.StringVar(value=self.config["build_type"])
         box = ttk.Combobox(options, textvariable=self.build_type, state="readonly", width=16,
@@ -645,10 +795,10 @@ class Launcher:
         ttk.Button(options, text="Open game log", command=self.open_game_log).pack(side="right")
 
         frame = ttk.Frame(tab)
-        frame.grid(row=3, column=0, sticky="nsew")
+        frame.grid(row=4, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
-        self.log = tk.Text(frame, height=12, wrap="none", font=("Consolas", 9), background="#111",
+        self.log = tk.Text(frame, height=12, wrap="none", font=("Consolas", 9), background="#0e0c0a",
                            foreground="#ddd", insertbackground="#ddd", state="disabled")
         self.log.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(frame, command=self.log.yview)
@@ -792,8 +942,7 @@ class Launcher:
         ]
         for r, row in enumerate(rows):
             for c, text in enumerate(row):
-                font = ("Segoe UI", 10, "bold") if r == 0 else None
-                ttk.Label(tab, text=text, font=font).grid(row=r, column=c, sticky="w", padx=(0, 32), pady=2)
+                ttk.Label(tab, text=text, style="Section.TLabel" if r == 0 else "TLabel").grid(row=r, column=c, sticky="w", padx=(0, 32), pady=2)
 
     # -- playing --
 
@@ -807,11 +956,9 @@ class Launcher:
             messagebox.showwarning("Dojo", "Choose your disc image first (Game tab).")
             self.tabs.select(0)
             return
-        if not self.decomp_ok() and os.path.normcase(os.path.abspath(self.decomp_var.get().strip().strip('"'))) \
-                == os.path.normcase(DECOMP_DIR):
-            if messagebox.askyesno("Dojo", "The game is built from its decompiled source, which isn't downloaded "
-                                   "yet. Download it now (a few MB)?"):
-                self.download_decomp()
+        chosen = os.path.normcase(os.path.abspath(self.decomp_var.get().strip().strip('"') or DECOMP_DIR))
+        if chosen == os.path.normcase(DECOMP_DIR) and decomp_commit(DECOMP_DIR) != DECOMP_COMMIT:
+            self.download_decomp(then_play=True)
             return
         if self.build_first_var.get() or not os.path.isfile(EXE):
             if self.decomp_ok() and toolchain_version():
@@ -869,16 +1016,25 @@ class Launcher:
                     if ok and then_play:
                         self.launch()
                 elif kind == "download-progress":
-                    self.decomp_info.configure(text="Downloading... %.1f MB" % (value / 1e6), style="TLabel")
+                    text = "Downloading the game's source... %.1f MB" % (value / 1e6)
+                    self.decomp_info.configure(text=text, style="TLabel")
+                    self.status.configure(text=text)
                 elif kind == "download-done":
                     self.busy = None
                     if value:
                         self.decomp_info.configure(text="The download failed: %s" % value, style="Bad.TLabel")
-                    elif os.path.normcase(self.decomp_var.get().strip()) != os.path.normcase(DECOMP_DIR):
-                        self.decomp_var.set(DECOMP_DIR)
+                        self.status.configure(text="Couldn't download the game's source; check the internet "
+                                              "connection and press Play again.")
                     else:
-                        self.refresh_decomp()
+                        self.status.configure(text="Downloaded the game's source.")
+                        if os.path.normcase(self.decomp_var.get().strip()) != os.path.normcase(DECOMP_DIR):
+                            self.decomp_var.set(DECOMP_DIR)
+                        else:
+                            self.refresh_decomp()
                     self.update_buttons()
+                    if not value and getattr(self, "download_then_play", False):
+                        self.download_then_play = False
+                        self.play()
                 elif kind == "verify-progress":
                     self.verify_progress["value"] = value
                 elif kind == "verify-done":
