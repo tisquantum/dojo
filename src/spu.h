@@ -15,6 +15,8 @@ void SpuDmaRegisterWritten(uint32_t address);
 /* Produces one field's samples, for the host to take with SpuTakeFieldAudio. */
 void SpuVerticalBlank(void);
 const int16_t *SpuTakeFieldAudio(int *frames);
+/* The same field's sound effects alone, dry (no music, speech or ambience), for a DualSense's haptics. */
+const int16_t *SpuTakeFieldHaptics(int *frames);
 /* Queues decoded CD audio (XA), interleaved stereo at `rate` Hz, for the SPU's CD input. */
 void SpuQueueCdAudio(const int16_t *stereo, int frames, int rate);
 

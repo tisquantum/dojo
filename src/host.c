@@ -221,6 +221,12 @@ static void RecordAudio(const short *stereo, int frames)
 
 void HostQueueAudio(const short *stereo, int frames)
 {
+    {
+        /* the field's sound effects, for a DualSense's haptics (a field run again after a rollback has neither) */
+        int hapticFrames;
+        const int16_t *haptic = SpuTakeFieldHaptics(&hapticFrames);
+        InputQueueHaptics(haptic, hapticFrames);
+    }
     RecordAudio(stereo, frames);
     /* Keep at most a fifth of a second queued: running ahead (fast-forward, a stall) drops sound, not time. */
     if (!sAudio || SDL_GetAudioStreamQueued(sAudio) > SPU_SAMPLE_RATE * 4 / 5) {

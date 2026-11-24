@@ -363,12 +363,18 @@ static void NextCdFrame(int32_t *l, int32_t *r)
     }
 }
 
-static void MixSample(int16_t out[2])
+/* The voices the game plays its sound effects on (include/voice_state.h): footsteps, swings, clashes and
+ * hits, panned as heard. Not voices 0 and 1, its speech, nor 17 and up, the stage's ambience. */
+#define HAPTIC_VOICE_FIRST 2
+#define HAPTIC_VOICE_END   17
+
+static void MixSample(int16_t out[2], int16_t haptic[2])
 {
-    int32_t left = 0, right = 0, revL = 0, revR = 0, cdL, cdR;
+    int32_t left = 0, right = 0, revL = 0, revR = 0, cdL, cdR, hapticL = 0, hapticR = 0;
     int32_t modulator = 0;
     int i;
 
+    haptic[0] = haptic[1] = 0;
     if (!(sRegs[R_SPUCNT] & 0x8000)) {
         out[0] = out[1] = 0;
         NextCdFrame(&cdL, &cdR);
@@ -392,6 +398,10 @@ static void MixSample(int16_t out[2])
         modulator = s;
         left += l;
         right += r;
+        if (i >= HAPTIC_VOICE_FIRST && i < HAPTIC_VOICE_END) {
+            hapticL += l;
+            hapticR += r;
+        }
         if (VoiceBit(R_EON_L, i)) {
             revL += l;
             revR += r;
@@ -421,7 +431,10 @@ static void MixSample(int16_t out[2])
     right += sReverbOutR;
     if (!(sRegs[R_SPUCNT] & 0x4000)) {
         left = right = 0; /* muted */
+        hapticL = hapticR = 0;
     }
+    haptic[0] = Clamp16(hapticL); /* dry, and not at the player's volume: the haptics have their own */
+    haptic[1] = Clamp16(hapticR);
     out[0] = Clamp16(Mul15(Clamp16(left), VolumeLevel(sRegs[R_MVOL_L])) * 2);
     out[1] = Clamp16(Mul15(Clamp16(right), VolumeLevel(sRegs[R_MVOL_R])) * 2);
 }
@@ -554,8 +567,16 @@ void SpuQueueCdAudio(const int16_t *stereo, int frames, int rate)
  * calls do not run on the game's stack. */
 #pragma clang section bss = ".bss$render" data = ".data$render"
 static int16_t sFieldAudio[1024][2];
-static int sFieldAudioCount;
+static int16_t sFieldHaptics[1024][2];
+static int sFieldAudioCount, sFieldHapticsCount;
 #pragma clang section bss = ".bss$sim" data = ".data$sim"
+
+const int16_t *SpuTakeFieldHaptics(int *frames)
+{
+    *frames = sFieldHapticsCount;
+    sFieldHapticsCount = 0;
+    return &sFieldHaptics[0][0];
+}
 
 const int16_t *SpuTakeFieldAudio(int *frames)
 {
@@ -580,8 +601,8 @@ void SpuVerticalBlank(void)
     {
         int i;
         for (i = 0; i < count; i++) {
-            MixSample(buffer[i]);
+            MixSample(buffer[i], sFieldHaptics[i]);
         }
     }
-    sFieldAudioCount = count;
+    sFieldAudioCount = sFieldHapticsCount = count;
 }

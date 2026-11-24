@@ -46,6 +46,8 @@ int InputHapticsActive(void);
 
 /* Each field: the game's rumble to the players' gamepads; `running` 0 lets go of every motor. */
 void InputUpdateRumble(int running);
+/* Each field's sound effects (spu.c), for the haptics of a DualSense on a cable. */
+void InputQueueHaptics(const int16_t *stereo, int frames);
 
 /* The launcher's helpers, run as dojo.exe --pads (the gamepads and each player's), --capture-pad (the next
  * gamepad binding pressed) or --test-rumble 1|2; returns the exit code, or -1 for an unknown command. */

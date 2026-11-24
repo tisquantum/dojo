@@ -6,7 +6,10 @@
  * Rumble comes from the game's own DualShock pulse (gRumblePulses: a duty, in 4096ths, the console turns into
  * a motor's on and off), as a strength for SDL's rumble. A DualSense on a cable has no motors but haptic
  * actuators, which Windows sees as the third and fourth channels of the controller's sound device; with
- * haptics on, the pulse becomes a wave played there instead. */
+ * haptics on, they play the game's sound effects (spu.c: footsteps, swings, clashes, hits, panned as heard):
+ * their low end as it is, and their higher sounds, which the actuators can't follow, as taps of a 180 Hz wave
+ * that follows their loudness, both only where a sound begins (a fast loudness above a slow one), so a step or
+ * a clash is a tap and a held sound fades away. The pulse is a wave on top. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,12 +56,27 @@ extern struct {
 
 /* A wired DualSense's haptics: a wave on its sound device's third and fourth channels, made in SDL's audio
  * thread from the strength the game thread sets. */
+#define HAPTIC_RING 8192 /* frames of the effects' wave waiting for the audio thread */
+
 typedef struct Haptics {
     SDL_AudioStream *stream;
     SDL_AudioDeviceID device;
     SDL_AtomicInt strength; /* 0 to 10000 */
     float level, kick, phase;
+    float ring[HAPTIC_RING][2];   /* the effects' wave, left and right actuators */
+    SDL_AtomicInt written, read;  /* frames put in and taken out, counting on */
 } Haptics;
+
+/* Turning the effects into a wave for the actuators: a resampler from 44.1 to 48 kHz and, each side, two
+ * low-pass stages, a loudness follower of what's above them and the carrier it plays. */
+static struct {
+    double position;          /* in the field's samples, of the next output sample */
+    float previous[2];        /* the last field's last sample */
+    float low[2][2], envelope[2], phase;
+    float fast[2], slow[2];   /* the whole sound's loudness, quick and slow to follow: their gap is an onset */
+    FILE *wav;                /* DOJO_HAPTICS_WAV */
+    uint32_t wavBytes;
+} sShaper;
 
 static struct {
     SDL_Gamepad *pad;
@@ -394,7 +412,11 @@ static void SDLCALL FeedHaptics(void *user, SDL_AudioStream *stream, int additio
     Haptics *h = user;
     float target = (float)SDL_GetAtomicInt(&h->strength) / 10000.0f;
     int frames = additional / (int)(4 * sizeof(float));
+    unsigned written = (unsigned)SDL_GetAtomicInt(&h->written), read = (unsigned)SDL_GetAtomicInt(&h->read);
     (void)total;
+    if (written - read > 2400) {
+        read = written - 1200; /* behind by more than 50 ms (a stall): catch up to 25 */
+    }
     while (frames > 0) {
         float wave[256 * 4];
         int n = frames > 256 ? 256 : frames, i;
@@ -413,12 +435,114 @@ static void SDLCALL FeedHaptics(void *user, SDL_AudioStream *stream, int additio
             }
             amplitude = h->level * 0.8f + h->kick * h->level * 0.5f;
             amplitude = amplitude > 1 ? 1 : amplitude;
-            wave[i * 4 + 0] = wave[i * 4 + 1] = 0; /* the speaker stays quiet */
-            wave[i * 4 + 2] = wave[i * 4 + 3] = amplitude * SDL_sinf(h->phase);
+            {
+                float pulse = amplitude * SDL_sinf(h->phase), effectL = 0, effectR = 0, l, r;
+                if (read != written) {
+                    effectL = h->ring[read % HAPTIC_RING][0];
+                    effectR = h->ring[read % HAPTIC_RING][1];
+                    read++;
+                }
+                l = pulse + effectL;
+                r = pulse + effectR;
+                wave[i * 4 + 0] = wave[i * 4 + 1] = 0; /* the speaker stays quiet */
+                wave[i * 4 + 2] = l > 1 ? 1 : (l < -1 ? -1 : l);
+                wave[i * 4 + 3] = r > 1 ? 1 : (r < -1 ? -1 : r);
+            }
         }
         SDL_PutAudioStreamData(stream, wave, n * (int)(4 * sizeof(float)));
         frames -= n;
     }
+    SDL_SetAtomicInt(&h->read, (int)read);
+}
+
+/* DOJO_HAPTICS_WAV: the effects' wave as the actuators get it, to a 48 kHz stereo WAV, for checking it without
+ * a DualSense. */
+static void RecordHaptics(float l, float r)
+{
+    static int checked;
+    int16_t frame[2];
+    uint32_t riff;
+    if (!checked) {
+        static const unsigned char header[44] = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'A', 'V', 'E', 'f', 'm', 't',
+                                                 ' ', 16, 0, 0, 0, 1, 0, 2, 0, 0x80, 0xBB, 0, 0, 0x00, 0xEE, 2,
+                                                 0, 4, 0, 16, 0, 'd', 'a', 't', 'a', 0, 0, 0, 0};
+        const char *path = SDL_getenv("DOJO_HAPTICS_WAV");
+        checked = 1;
+        sShaper.wav = path ? fopen(path, "wb") : NULL;
+        if (sShaper.wav) {
+            fwrite(header, 1, sizeof(header), sShaper.wav);
+        }
+    }
+    if (!sShaper.wav) {
+        return;
+    }
+    frame[0] = (int16_t)(l * 32767);
+    frame[1] = (int16_t)(r * 32767);
+    fwrite(frame, 2, 2, sShaper.wav);
+    sShaper.wavBytes += 4;
+    if ((sShaper.wavBytes & 0xFFFF) == 0) {
+        riff = sShaper.wavBytes + 36;
+        fseek(sShaper.wav, 4, SEEK_SET);
+        fwrite(&riff, 4, 1, sShaper.wav);
+        fseek(sShaper.wav, 40, SEEK_SET);
+        fwrite(&sShaper.wavBytes, 4, 1, sShaper.wav);
+        fseek(sShaper.wav, 0, SEEK_END);
+        fflush(sShaper.wav);
+    }
+}
+
+void InputQueueHaptics(const int16_t *stereo, int frames)
+{
+    /* two one-pole stages at 250 Hz; the loudness follower rises in a fraction of a millisecond, falls in 15 */
+    const float lowCoefficient = 1.0f - SDL_expf(-2.0f * SDL_PI_F * 250.0f / HAPTIC_RATE);
+    const float rise = 0.3f, fall = 1.0f - SDL_expf(-1.0f / (0.015f * HAPTIC_RATE));
+    const float slowCoefficient = 1.0f - SDL_expf(-1.0f / (0.12f * HAPTIC_RATE));
+    const double step = 44100.0 / HAPTIC_RATE;
+    float strength = g_settings.rumble / 100.0f;
+    int p, out = 0;
+    if ((!sHaptics[0].stream && !sHaptics[1].stream && !SDL_getenv("DOJO_HAPTICS_WAV")) || frames <= 0) {
+        sShaper.position = 0;
+        return;
+    }
+    for (; sShaper.position < frames; sShaper.position += step, out++) {
+        int at = (int)sShaper.position, c;
+        float t = (float)(sShaper.position - at), side[2];
+        for (c = 0; c < 2; c++) {
+            float before = at == 0 ? sShaper.previous[c] : stereo[(at - 1) * 2 + c] / 32768.0f;
+            float x = before + (stereo[at * 2 + c] / 32768.0f - before) * t, high, y;
+            sShaper.low[c][0] += lowCoefficient * (x - sShaper.low[c][0]);
+            sShaper.low[c][1] += lowCoefficient * (sShaper.low[c][0] - sShaper.low[c][1]);
+            high = SDL_fabsf(x - sShaper.low[c][1]);
+            sShaper.envelope[c] += (high > sShaper.envelope[c] ? rise : fall) * (high - sShaper.envelope[c]);
+            sShaper.fast[c] += (SDL_fabsf(x) > sShaper.fast[c] ? rise : fall) * (SDL_fabsf(x) - sShaper.fast[c]);
+            sShaper.slow[c] += slowCoefficient * (sShaper.fast[c] - sShaper.slow[c]);
+            {
+                /* full strength while the sound jumps above its recent loudness, nothing once it holds steady */
+                float gate = sShaper.fast[c] > 1e-4f ? 1.5f * (sShaper.fast[c] - sShaper.slow[c]) / sShaper.fast[c] : 0;
+                gate = gate < 0 ? 0 : (gate > 1 ? 1 : gate);
+                y = gate * (2.5f * sShaper.low[c][1] + 2.5f * sShaper.envelope[c] * SDL_sinf(sShaper.phase));
+            }
+            side[c] = strength * y / (1.0f + 0.5f * SDL_fabsf(y)); /* loud ones soften, rather than clip */
+        }
+        sShaper.phase += 2.0f * SDL_PI_F * 180.0f / HAPTIC_RATE;
+        if (sShaper.phase > 2.0f * SDL_PI_F) {
+            sShaper.phase -= 2.0f * SDL_PI_F;
+        }
+        RecordHaptics(side[0], side[1]);
+        for (p = 0; p < 2; p++) {
+            Haptics *h = &sHaptics[p];
+            unsigned written = (unsigned)SDL_GetAtomicInt(&h->written);
+            if (h->stream && written - (unsigned)SDL_GetAtomicInt(&h->read) < HAPTIC_RING) {
+                h->ring[written % HAPTIC_RING][0] = side[0];
+                h->ring[written % HAPTIC_RING][1] = side[1];
+                SDL_SetAtomicInt(&h->written, (int)(written + 1));
+            }
+        }
+    }
+    sShaper.position -= frames;
+    sShaper.previous[0] = stereo[(frames - 1) * 2] / 32768.0f;
+    sShaper.previous[1] = stereo[(frames - 1) * 2 + 1] / 32768.0f;
+    (void)out;
 }
 
 static int IsWiredDualSense(int player)
@@ -471,7 +595,9 @@ void InputUpdateRumble(int running)
 {
     int p;
     Uint64 now = SDL_GetTicksNS();
-    int wantHaptics = g_settings.haptics && g_settings.rumble > 0 && (IsWiredDualSense(0) || IsWiredDualSense(1));
+    int hidden = SDL_getenv("DOJO_HIDDEN") != NULL; /* a test run leaves the controllers alone */
+    int wantHaptics = !hidden && g_settings.haptics && g_settings.rumble > 0 &&
+                      (IsWiredDualSense(0) || IsWiredDualSense(1));
     if (wantHaptics && now >= sHapticsRetry &&
         ((IsWiredDualSense(0) && !sHaptics[0].stream) || (IsWiredDualSense(1) && !sHaptics[1].stream))) {
         OpenHaptics();
@@ -482,7 +608,7 @@ void InputUpdateRumble(int running)
     for (p = 0; p < 2; p++) {
         /* Online the local fighter is one of the two, whichever controller plays it. */
         int port = NetplayActive() ? NetplayLocalPlayer() : p;
-        int duty = running ? gRumblePulses[port].dutyStep : 0;
+        int duty = running && !hidden ? gRumblePulses[port].dutyStep : 0;
         int strength = duty <= 0 ? 0 : (duty >= 4096 ? 10000 : duty * 10000 / 4096);
         SDL_Gamepad *pad = sPlayerPad[p] >= 0 ? sPads[sPlayerPad[p]].pad : NULL;
         strength = strength * g_settings.rumble / 100;
