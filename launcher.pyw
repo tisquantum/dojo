@@ -1,9 +1,10 @@
-"""Dojo launcher: point it at your disc image and the decompilation, set the options, build and play.
+"""Dojo launcher: point it at your disc image, set the options, build and play.
 
-Double-click this file (it runs with Python, which the build needs anyway), or run `python port/launcher.pyw`.
-It keeps its own choices in launcher.json beside it and writes the game's options to build/dojo.ini, the same
-file the in-game options menu (F1) changes. The game runs with this folder as its working folder, so the
-memory-card saves live in saves/ here.
+In a release it is Dojo.exe beside the source and the bundled toolchain (toolchain/); in a checkout, run
+`python launcher.pyw` after `python tools/fetch_toolchain.py`. It downloads the decompilation the game is built
+from (or uses one you choose), builds the game with the bundled tools, and starts it. It keeps its own choices
+in launcher.json, writes the game's options to build/dojo.ini (the file the in-game options menu, F1, changes
+too), and runs the game in this folder, so the memory-card saves live in saves/ here.
 """
 
 import hashlib
@@ -14,10 +15,24 @@ import shutil
 import subprocess
 import sys
 import threading
+import urllib.request
+import zipfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-PORT_DIR = os.path.dirname(os.path.abspath(__file__))
+DOJO_VERSION = "0.1.0"
+
+# The folder of Dojo.exe in a release, of this file in a checkout.
+PORT_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
+TOOLCHAIN = os.path.join(PORT_DIR, "toolchain")
+CMAKE = os.path.join(TOOLCHAIN, "cmake", "bin", "cmake.exe")
+DECOMP_DIR = os.path.join(PORT_DIR, "decomp")
+
+# The decompilation, with Dojo's changes, this version is built from: a branch of a fork of the decompilation,
+# fetched at this exact commit.
+DECOMP_COMMIT = "276a3af20be7c51b0e7d72f6d90cbe6814419ad6"
+DECOMP_URL = "https://github.com/tisquantum/bushido/archive/%s.zip" % DECOMP_COMMIT
+DECOMP_STAMP = ".dojo-decomp"
 BUILD_DIR = os.path.join(PORT_DIR, "build")
 EXE = os.path.join(BUILD_DIR, "dojo.exe")
 INI = os.path.join(BUILD_DIR, "dojo.ini")
@@ -152,52 +167,22 @@ def looks_like_disc(bin_path):
 
 # -- the build tools ------------------------------------------------------------------------------------------
 
-def find_tool(name, *candidates):
-    found = shutil.which(name)
-    if found:
-        return found
-    for candidate in candidates:
-        if candidate and os.path.isfile(candidate):
-            return candidate
-    return None
+def toolchain_version():
+    """The bundled toolchain's version, or None when it isn't there."""
+    try:
+        with open(os.path.join(TOOLCHAIN, "TOOLCHAIN_VERSION")) as f:
+            return f.read().strip()
+    except OSError:
+        return None
 
 
-def find_prerequisites():
-    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
-    pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-    local = os.environ.get("LOCALAPPDATA", "")
-    tools = {
-        "cmake": find_tool("cmake", os.path.join(pf, "CMake", "bin", "cmake.exe")),
-        "ninja": find_tool("ninja", os.path.join(local, "Microsoft", "WinGet", "Links", "ninja.exe")),
-        "clang": find_tool("clang", os.path.join(pf, "LLVM", "bin", "clang.exe")),
-        "python": sys.executable.replace("pythonw.exe", "python.exe"),
-        "msvc": None,
-        "vulkan": os.environ.get("VULKAN_SDK") or None,
-    }
-    vswhere = os.path.join(pf86, "Microsoft Visual Studio", "Installer", "vswhere.exe")
-    if os.path.isfile(vswhere):
-        try:
-            out = subprocess.run([vswhere, "-latest", "-products", "*", "-requires",
-                                  "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property",
-                                  "installationPath"], capture_output=True, text=True, creationflags=NO_WINDOW)
-            tools["msvc"] = out.stdout.strip() or None
-        except OSError:
-            pass
-    return tools
-
-
-PREREQUISITES = [
-    # key, name, required, how to get it
-    ("clang", "Clang (LLVM)", True, "winget install LLVM.LLVM"),
-    ("msvc", "Visual Studio C++ build tools (x86 libraries)", True,
-     'winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --add '
-     'Microsoft.VisualStudio.Workload.VCTools --includeRecommended"'),
-    ("cmake", "CMake", True, "winget install Kitware.CMake"),
-    ("ninja", "Ninja", True, "winget install Ninja-build.Ninja"),
-    ("python", "Python 3", True, "winget install Python.Python.3.12"),
-    ("vulkan", "Vulkan SDK (optional: the build downloads a shader compiler otherwise)", False,
-     "winget install KhronosGroup.VulkanSDK"),
-]
+def decomp_commit(path):
+    """The commit a downloaded decompilation came from (None for one chosen by hand)."""
+    try:
+        with open(os.path.join(path, DECOMP_STAMP)) as f:
+            return f.read().strip()
+    except OSError:
+        return None
 
 
 # -- the window -----------------------------------------------------------------------------------------------
@@ -209,9 +194,8 @@ class Launcher:
         self.busy = None          # "build", "verify" or None
         self.game = None          # the running game's process
         self.config = self.load_config()
-        self.tools = {}
 
-        root.title("Dojo Launcher")
+        root.title("Dojo %s" % DOJO_VERSION)
         root.minsize(720, 560)
         style = ttk.Style()
         if "vista" in style.theme_names():
@@ -255,16 +239,22 @@ class Launcher:
     # -- the launcher's own settings --
 
     def load_config(self):
-        config = {"disc": "", "decomp": "", "build_type": "RelWithDebInfo", "build_first": True}
+        config = {"disc": "", "decomp": "", "build_type": "Release", "build_first": True}
         try:
             with open(LAUNCHER_JSON, encoding="utf-8") as f:
-                config.update(json.load(f))
+                saved = json.load(f)
+            if saved.get("version") != 2:
+                saved.pop("build_type", None)   # players build Release: the same bytes as everyone else
+            config.update(saved)
         except (OSError, ValueError):
             pass
+        config["version"] = 2
         if not config["decomp"]:
             parent = os.path.dirname(PORT_DIR)
             if os.path.isfile(os.path.join(parent, "src", "main.c")):
-                config["decomp"] = parent
+                config["decomp"] = parent   # a checkout inside the decompilation
+            else:
+                config["decomp"] = DECOMP_DIR
         if not config["disc"]:
             for folder in (os.path.join(config["decomp"] or os.path.dirname(PORT_DIR), "game_files"),
                            os.path.join(PORT_DIR, "game_files")):
@@ -308,11 +298,13 @@ class Launcher:
 
         ttk.Label(tab, text="Decompilation folder", font=("Segoe UI", 10, "bold")).grid(row=6, column=0,
                                                                                          sticky="w")
-        ttk.Label(tab, text="The Bushido Blade decompilation (with the port's changes) the game is built "
-                  "from. It isn't part of this repository.", style="Sub.TLabel",
-                  wraplength=640).grid(row=7, column=0, columnspan=4, sticky="w", pady=(0, 6))
+        ttk.Label(tab, text="The decompiled source of Bushido Blade, with Dojo's changes, that the game is built "
+                  "from. It isn't shipped with Dojo: Download fetches this version's copy from GitHub.",
+                  style="Sub.TLabel", wraplength=640).grid(row=7, column=0, columnspan=4, sticky="w", pady=(0, 6))
         self.decomp_var = tk.StringVar(value=self.config["decomp"])
-        ttk.Entry(tab, textvariable=self.decomp_var).grid(row=8, column=0, columnspan=3, sticky="ew")
+        ttk.Entry(tab, textvariable=self.decomp_var).grid(row=8, column=0, columnspan=2, sticky="ew")
+        self.download_button = ttk.Button(tab, text="Download", command=self.download_decomp)
+        self.download_button.grid(row=8, column=2, padx=(6, 0))
         ttk.Button(tab, text="Folder...", command=self.pick_decomp).grid(row=8, column=3, padx=(6, 0))
         self.decomp_var.trace_add("write", lambda *_: self.refresh_decomp())
         self.decomp_info = ttk.Label(tab, text="")
@@ -375,16 +367,75 @@ class Launcher:
     def refresh_decomp(self):
         path = self.decomp_var.get().strip().strip('"')
         self.set_config("decomp", path)
-        if self.decomp_ok():
-            self.decomp_info.configure(text="Found the decompilation.", style="Good.TLabel")
+        commit = decomp_commit(path) if path else None
+        if self.decomp_ok() and commit and commit != DECOMP_COMMIT:
+            self.decomp_info.configure(text="This is another version's decompilation: press Download for this "
+                                       "version's.", style="Warn.TLabel")
+        elif self.decomp_ok():
+            self.decomp_info.configure(text="Ready." if commit else "Found the decompilation (your own copy).",
+                                       style="Good.TLabel")
         elif path and os.path.isfile(os.path.join(path, "src", "main.c")):
             self.decomp_info.configure(text="This decompilation is missing the port's changes "
                                        "(include/substep.h).", style="Bad.TLabel")
+        elif path and os.path.normcase(os.path.abspath(path)) == os.path.normcase(DECOMP_DIR) and \
+                not os.path.isdir(path):
+            self.decomp_info.configure(text="Not downloaded yet: press Download (a few MB).",
+                                       style="Warn.TLabel")
         else:
             self.decomp_info.configure(text="Not the decompilation (no src/main.c in it).",
                                        style="Bad.TLabel" if path else "Warn.TLabel")
         if hasattr(self, "play_button"):
             self.update_buttons()
+
+    def download_decomp(self):
+        if self.busy:
+            return
+        dest = DECOMP_DIR
+        if os.path.isdir(dest) and os.listdir(dest) and decomp_commit(dest) is None:
+            messagebox.showwarning("Dojo", "%s holds files the launcher didn't download; move them away first."
+                                   % dest)
+            return
+        self.busy = "download"
+        self.update_buttons()
+        self.decomp_info.configure(text="Downloading...", style="TLabel")
+
+        def work():
+            part = dest + ".zip.part"
+            try:
+                with urllib.request.urlopen(DECOMP_URL) as response, open(part, "wb") as out:
+                    done = 0
+                    while True:
+                        chunk = response.read(1 << 18)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        done += len(chunk)
+                        self.events.put(("download-progress", done))
+                top = "bushido-%s/" % DECOMP_COMMIT
+                fresh = dest + ".new"
+                shutil.rmtree(fresh, ignore_errors=True)
+                with zipfile.ZipFile(part) as z:
+                    for info in z.infolist():
+                        if not info.filename.startswith(top) or info.filename.endswith("/"):
+                            continue
+                        target = os.path.normpath(os.path.join(fresh, info.filename[len(top):]))
+                        if not target.startswith(os.path.normpath(fresh) + os.sep):
+                            raise OSError("unsafe path in the download: " + info.filename)
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        with z.open(info) as src, open(target, "wb") as out:
+                            shutil.copyfileobj(src, out)
+                with open(os.path.join(fresh, DECOMP_STAMP), "w") as f:
+                    f.write(DECOMP_COMMIT + "\n")
+                shutil.rmtree(dest, ignore_errors=True)
+                os.replace(fresh, dest)
+                self.events.put(("download-done", None))
+            except Exception as e:   # network, disk or a bad archive: all reported the same way
+                self.events.put(("download-done", str(e)))
+            finally:
+                if os.path.exists(part):
+                    os.remove(part)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def verify_disc(self):
         bin_path = self.disc_bin()
@@ -577,8 +628,7 @@ class Launcher:
         tab.columnconfigure(0, weight=1)
         tab.rowconfigure(3, weight=1)
 
-        ttk.Label(tab, text="Tools the build needs", font=("Segoe UI", 10, "bold")).grid(row=0, column=0,
-                                                                                         sticky="w")
+        ttk.Label(tab, text="Build tools", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
         self.tool_frame = ttk.Frame(tab)
         self.tool_frame.grid(row=1, column=0, sticky="ew", pady=(4, 8))
         self.tool_frame.columnconfigure(1, weight=1)
@@ -588,7 +638,7 @@ class Launcher:
         ttk.Label(options, text="Build type").pack(side="left")
         self.build_type = tk.StringVar(value=self.config["build_type"])
         box = ttk.Combobox(options, textvariable=self.build_type, state="readonly", width=16,
-                           values=["RelWithDebInfo", "Release", "Debug"])
+                           values=["Release", "RelWithDebInfo", "Debug"])
         box.pack(side="left", padx=6)
         box.bind("<<ComboboxSelected>>", lambda _: self.set_config("build_type", self.build_type.get()))
         ttk.Button(options, text="Check again", command=self.check_tools).pack(side="left", padx=6)
@@ -608,22 +658,33 @@ class Launcher:
         self.log.tag_configure("good", foreground="#7ee787")
 
     def check_tools(self):
-        self.tools = find_prerequisites()
         for child in self.tool_frame.winfo_children():
             child.destroy()
-        for row, (key, name, required, install) in enumerate(PREREQUISITES):
-            found = self.tools.get(key)
-            mark, style = ("OK", "Good.TLabel") if found else (("Missing", "Bad.TLabel") if required
-                                                                else ("Not found", "Warn.TLabel"))
-            ttk.Label(self.tool_frame, text=mark, style=style, width=9).grid(row=row, column=0, sticky="w")
-            ttk.Label(self.tool_frame, text=name).grid(row=row, column=1, sticky="w")
-            if not found:
-                ttk.Button(self.tool_frame, text="Copy install command",
-                           command=lambda c=install: self.copy(c)).grid(row=row, column=2, sticky="e")
+        version = toolchain_version()
+        if version:
+            ttk.Label(self.tool_frame, text="OK", style="Good.TLabel", width=9).grid(row=0, column=0, sticky="w")
+            ttk.Label(self.tool_frame, text="Bundled toolchain %s: Clang (llvm-mingw), CMake, Ninja, Python, SDL3, "
+                      "glslang. Nothing to install." % version).grid(row=0, column=1, sticky="w")
+        else:
+            ttk.Label(self.tool_frame, text="Missing", style="Bad.TLabel", width=9).grid(row=0, column=0,
+                                                                                        sticky="w")
+            fetch = os.path.join(PORT_DIR, "tools", "fetch_toolchain.py")
+            if getattr(sys, "frozen", False) or not os.path.isfile(fetch):
+                ttk.Label(self.tool_frame, text="The toolchain folder is missing: unpack the whole Dojo zip again."
+                          ).grid(row=0, column=1, sticky="w")
+            else:
+                ttk.Label(self.tool_frame, text="No toolchain in this checkout yet (about 200 MB to download)."
+                          ).grid(row=0, column=1, sticky="w")
+                ttk.Button(self.tool_frame, text="Fetch toolchain", command=self.fetch_toolchain).grid(
+                    row=0, column=2, sticky="e")
         self.update_buttons()
 
-    def missing_tools(self):
-        return [name for key, name, required, _ in PREREQUISITES if required and not self.tools.get(key)]
+    def fetch_toolchain(self):
+        if self.busy:
+            return
+        python = sys.executable.replace("pythonw.exe", "python.exe")
+        self.run_steps([[python, "-u", os.path.join(PORT_DIR, "tools", "fetch_toolchain.py")]], "Toolchain ready.",
+                       after=self.check_tools)
 
     def copy(self, text):
         self.root.clipboard_clear()
@@ -650,9 +711,8 @@ class Launcher:
             problems.append("Choose the decompilation folder (Game tab).")
         if not self.disc_bin():
             problems.append("Choose your disc image (Game tab).")
-        missing = self.missing_tools()
-        if missing:
-            problems.append("Install: %s (Build tab)." % ", ".join(missing))
+        if not toolchain_version():
+            problems.append("The build tools are missing (Build tab).")
         if problems:
             messagebox.showwarning("Dojo", "Can't build yet:\n\n" + "\n".join(problems))
             return
@@ -663,29 +723,32 @@ class Launcher:
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
 
-        tools = self.tools
-        env = dict(os.environ)
-        extra = [os.path.dirname(tools[k]) for k in ("clang", "cmake", "ninja", "python") if tools.get(k)]
-        env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])
-        configure = [tools["cmake"], "-S", PORT_DIR, "-B", BUILD_DIR, "-G", "Ninja",
+        configure = [CMAKE, "-S", PORT_DIR, "-B", BUILD_DIR, "-G", "Ninja",
                      "-DCMAKE_BUILD_TYPE=" + self.build_type.get(),
                      "-DDOJO_DECOMP_DIR=" + os.path.abspath(self.decomp_var.get().strip().strip('"')),
-                     "-DDOJO_DISC=" + os.path.abspath(self.disc_bin()),
-                     "-DPython3_EXECUTABLE=" + tools["python"]]
+                     "-DDOJO_DISC=" + os.path.abspath(self.disc_bin())]
         cache = os.path.join(BUILD_DIR, "CMakeCache.txt")
         if os.path.isfile(cache):
-            # A configure that failed to find the compiler leaves a cache with no compiler flags, which builds
-            # without optimisation: start that cache over.
+            # A cache from before the bundled toolchain, or from a configure that failed to find the compiler
+            # (no compiler flags, so no optimisation), is started over.
             with open(cache, encoding="utf-8", errors="replace") as f:
                 text = f.read()
             if "CMAKE_C_FLAGS_%s:STRING=\n" % self.build_type.get().upper() in text or \
-                    "CMAKE_C_COMPILER:UNINITIALIZED" in text:
+                    "i686-w64-mingw32-clang" not in text:
                 os.remove(cache)
                 shutil.rmtree(os.path.join(BUILD_DIR, "CMakeFiles"), ignore_errors=True)
-        if not os.path.isfile(cache):
-            # Only on the first configure: changing the compiler of a configured tree makes CMake start over.
-            configure += ["-DCMAKE_C_COMPILER=" + tools["clang"], "-DCMAKE_MAKE_PROGRAM=" + tools["ninja"]]
-        steps = [configure, [tools["cmake"], "--build", BUILD_DIR]]
+        self.run_steps([configure, [CMAKE, "--build", BUILD_DIR]], "Built.", then_play=then_play)
+
+    def run_steps(self, steps, success, then_play=False, after=None):
+        """Runs the commands one after another, their output in the log; stops at the first that fails."""
+        self.busy = "build"
+        self.update_buttons()
+        self.tabs.select(2)
+        env = dict(os.environ)
+        # Only the bundled tools: nothing installed on this PC takes part.
+        env["PATH"] = os.pathsep.join([os.path.join(TOOLCHAIN, "llvm-mingw", "bin"), os.path.join(TOOLCHAIN, "ninja"),
+                                       os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")])
+        self.after_steps = after
 
         def work():
             for step in steps:
@@ -700,9 +763,9 @@ class Launcher:
                 for line in process.stdout:
                     self.events.put(("log", line))
                 if process.wait() != 0:
-                    self.events.put(("build-done", (False, "The build failed: see the log above.", then_play)))
+                    self.events.put(("build-done", (False, "That failed: see the log above.", then_play)))
                     return
-            self.events.put(("build-done", (True, "Built.", then_play)))
+            self.events.put(("build-done", (True, success, then_play)))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -744,8 +807,14 @@ class Launcher:
             messagebox.showwarning("Dojo", "Choose your disc image first (Game tab).")
             self.tabs.select(0)
             return
+        if not self.decomp_ok() and os.path.normcase(os.path.abspath(self.decomp_var.get().strip().strip('"'))) \
+                == os.path.normcase(DECOMP_DIR):
+            if messagebox.askyesno("Dojo", "The game is built from its decompiled source, which isn't downloaded "
+                                   "yet. Download it now (a few MB)?"):
+                self.download_decomp()
+            return
         if self.build_first_var.get() or not os.path.isfile(EXE):
-            if self.decomp_ok() and not self.missing_tools():
+            if self.decomp_ok() and toolchain_version():
                 self.build(then_play=True)
                 return
             if not os.path.isfile(EXE):
@@ -791,11 +860,25 @@ class Launcher:
                 elif kind == "build-done":
                     ok, text, then_play = value
                     self.busy = None
+                    if getattr(self, "after_steps", None):
+                        self.after_steps, after = None, self.after_steps
+                        after()
                     self.write_log("\n" + text + "\n", "good" if ok else "error")
                     self.status.configure(text=text)
                     self.update_buttons()
                     if ok and then_play:
                         self.launch()
+                elif kind == "download-progress":
+                    self.decomp_info.configure(text="Downloading... %.1f MB" % (value / 1e6), style="TLabel")
+                elif kind == "download-done":
+                    self.busy = None
+                    if value:
+                        self.decomp_info.configure(text="The download failed: %s" % value, style="Bad.TLabel")
+                    elif os.path.normcase(self.decomp_var.get().strip()) != os.path.normcase(DECOMP_DIR):
+                        self.decomp_var.set(DECOMP_DIR)
+                    else:
+                        self.refresh_decomp()
+                    self.update_buttons()
                 elif kind == "verify-progress":
                     self.verify_progress["value"] = value
                 elif kind == "verify-done":
@@ -833,9 +916,9 @@ class Launcher:
         busy = self.busy is not None or running
         self.build_button.configure(state="disabled" if busy else "normal")
         self.play_button.configure(state="disabled" if busy else "normal",
-                                   text="Playing..." if running else ("Building..." if self.busy == "build"
-                                                                       else "Play"))
+                                   text="Playing..." if running else ("Working..." if self.busy else "Play"))
         self.verify_button.configure(state="disabled" if busy or not self.disc_bin() else "normal")
+        self.download_button.configure(state="disabled" if busy else "normal")
         if os.path.isfile(EXE):
             self.exe_info.configure(text="Game built: %s" % EXE, style="Good.TLabel")
         else:

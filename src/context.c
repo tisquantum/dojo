@@ -8,7 +8,7 @@
 
 #define GAME_STACK_SIZE (1 << 20)
 
-static __declspec(align(16)) unsigned char sGameStack[GAME_STACK_SIZE];
+static __attribute__((aligned(16))) unsigned char sGameStack[GAME_STACK_SIZE];
 static void *sHostSp;
 static void *sGameSp;
 static void (*sEntry)(void);

@@ -4,12 +4,23 @@
 # The game is 32-bit code through and through (pointers in disc records, 24-bit ordering-table links), so the
 # port builds a 32-bit executable linked at a fixed base low enough that every address fits 24 bits.
 #
-#   cmake -S port -B port/build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=RelWithDebInfo
-#   cmake --build port/build
+# It builds with the self-contained toolchain in toolchain/ (tools/fetch_toolchain.py fetches it; the release
+# ships it): llvm-mingw for 32-bit x86, CMake, Ninja, Python, SDL3, the Vulkan headers and glslang. Everyone
+# building with the same tools makes the same program, which online play relies on.
+#
+#   toolchain/cmake/bin/cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+#   toolchain/cmake/bin/cmake --build build
 
 cmake_minimum_required(VERSION 3.20)
 
-set(CMAKE_C_COMPILER_TARGET i686-pc-windows-msvc CACHE STRING "")
+set(DOJO_TOOLCHAIN "${CMAKE_CURRENT_SOURCE_DIR}/toolchain" CACHE PATH "The self-contained toolchain")
+if(NOT EXISTS "${DOJO_TOOLCHAIN}/TOOLCHAIN_VERSION")
+    message(FATAL_ERROR "No toolchain in ${DOJO_TOOLCHAIN}: run tools/fetch_toolchain.py")
+endif()
+set(CMAKE_C_COMPILER "${DOJO_TOOLCHAIN}/llvm-mingw/bin/i686-w64-mingw32-clang.exe" CACHE FILEPATH "" FORCE)
+if(NOT CMAKE_MAKE_PROGRAM)
+    set(CMAKE_MAKE_PROGRAM "${DOJO_TOOLCHAIN}/ninja/ninja.exe" CACHE FILEPATH "")
+endif()
 project(dojo_pc C)
 
 set(DOJO_DECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." CACHE PATH
@@ -22,6 +33,7 @@ set(REPO_ROOT ${DOJO_DECOMP_DIR})
 set(DOJO_DISC "${REPO_ROOT}/game_files/Bushido Blade (USA).bin" CACHE FILEPATH
     "The player's disc image; the build takes the loading-screen picture from its executable")
 
+set(Python3_EXECUTABLE "${DOJO_TOOLCHAIN}/python/python.exe" CACHE FILEPATH "")
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # The loading-screen picture the source includes from the player's own executable.
@@ -34,6 +46,15 @@ add_custom_command(
             ${DOJO_DISC}
     COMMENT "Extracting the loading-screen picture from the disc image")
 add_custom_target(game_assets DEPENDS ${GENERATED_DIR}/content/now_loading.inc)
+
+# Debug information as a PDB (CodeView), which crash reports (llvm-symbolizer) and tools/statediff.py read.
+add_compile_options($<$<CONFIG:RelWithDebInfo,Debug>:-gcodeview>)
+add_link_options($<$<CONFIG:RelWithDebInfo,Debug>:-Wl,--pdb=> "LINKER:-Xlink=-pdbaltpath:%_PDB%")
+# Reproducible: the same program wherever it is built (no timestamp, no folder names), so two players' builds
+# are the same bytes.
+add_link_options(-Wl,--no-insert-timestamp)
+add_compile_options(-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=dojo -ffile-prefix-map=${DOJO_DECOMP_DIR}=decomp
+    -ffile-prefix-map=${CMAKE_CURRENT_BINARY_DIR}=build)
 
 # The console compiler's semantics the decompiled code relies on.
 set(PSX_C_FLAGS
@@ -109,73 +130,24 @@ target_compile_definitions(dojo_lib PRIVATE TARGET_PC)
 # of them uses floating point, so without SSE a block copy is plain 32-bit moves.
 target_compile_options(dojo_lib PRIVATE ${PSX_C_FLAGS} ${SIM_SECTIONS} -fno-vectorize -fno-slp-vectorize -mno-sse)
 
-# SDL3, the window, input and audio: the official Visual C++ development package, checked by its SHA-256.
-set(SDL3_VERSION 3.2.10)
-set(SDL3_ZIP ${CMAKE_CURRENT_BINARY_DIR}/_deps/SDL3-devel-${SDL3_VERSION}-VC.zip)
-if(NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}/_deps/SDL3-${SDL3_VERSION})
-    file(DOWNLOAD
-        https://github.com/libsdl-org/SDL/releases/download/release-${SDL3_VERSION}/SDL3-devel-${SDL3_VERSION}-VC.zip
-        ${SDL3_ZIP}
-        EXPECTED_HASH SHA256=afcfafc7e389e048c3693e11fe645ea84392c35673e4f201fe21ac513719935d)
-    file(ARCHIVE_EXTRACT INPUT ${SDL3_ZIP} DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/_deps)
-endif()
-set(SDL3_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps/SDL3-${SDL3_VERSION})
+# SDL3, the window, input and audio (the toolchain's mingw development package), the Vulkan headers (the entry
+# points are loaded at run time through SDL, so nothing more is needed to link), and glslang for the shaders.
+set(SDL3_DIR ${DOJO_TOOLCHAIN}/deps/SDL3/i686-w64-mingw32)
 add_library(SDL3 SHARED IMPORTED)
 set_target_properties(SDL3 PROPERTIES
-    IMPORTED_LOCATION ${SDL3_DIR}/lib/x86/SDL3.dll
-    IMPORTED_IMPLIB ${SDL3_DIR}/lib/x86/SDL3.lib
+    IMPORTED_LOCATION ${SDL3_DIR}/bin/SDL3.dll
+    IMPORTED_IMPLIB ${SDL3_DIR}/lib/libSDL3.dll.a
     INTERFACE_INCLUDE_DIRECTORIES ${SDL3_DIR}/include)
-
-# Vulkan: the official headers (the entry points are loaded at run time through SDL, so no SDK is needed to
-# link), and a GLSL compiler for the shaders: the Vulkan SDK's glslc when VULKAN_SDK is set, otherwise the
-# official glslang release, both checked by SHA-256.
-set(VULKAN_HEADERS_TAG vulkan-sdk-1.4.341.0)
-set(VULKAN_HEADERS_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps/Vulkan-Headers-${VULKAN_HEADERS_TAG})
-if(NOT EXISTS ${VULKAN_HEADERS_DIR})
-    file(DOWNLOAD https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/${VULKAN_HEADERS_TAG}.zip
-        ${CMAKE_CURRENT_BINARY_DIR}/_deps/vulkan-headers.zip
-        EXPECTED_HASH SHA256=1a0ea8ce1f1f08bcf9a7e4962646ba6b2a09b40108ca516fc6a006e45c77cb65)
-    file(ARCHIVE_EXTRACT INPUT ${CMAKE_CURRENT_BINARY_DIR}/_deps/vulkan-headers.zip
-        DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/_deps)
-endif()
-
-if(DEFINED ENV{VULKAN_SDK} AND EXISTS "$ENV{VULKAN_SDK}/Bin/glslc.exe")
-    set(SHADER_COMPILER "$ENV{VULKAN_SDK}/Bin/glslc.exe")
-    set(SHADER_COMPILER_KIND glslc)
-else()
-    set(GLSLANG_VERSION 16.5.0)
-    set(GLSLANG_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps/glslang-${GLSLANG_VERSION})
-    if(NOT EXISTS ${GLSLANG_DIR})
-        file(DOWNLOAD
-            https://github.com/KhronosGroup/glslang/releases/download/${GLSLANG_VERSION}/glslang-${GLSLANG_VERSION}-windows-x86_64-release.zip
-            ${CMAKE_CURRENT_BINARY_DIR}/_deps/glslang.zip
-            EXPECTED_HASH SHA256=06b71298b750268c127f2ee7ae0ef7525e2068120c6c8a3a08b2f58ca6f325ce)
-        file(ARCHIVE_EXTRACT INPUT ${CMAKE_CURRENT_BINARY_DIR}/_deps/glslang.zip DESTINATION ${GLSLANG_DIR})
-    endif()
-    set(SHADER_COMPILER ${GLSLANG_DIR}/bin/glslang.exe)
-    set(SHADER_COMPILER_KIND glslang)
-endif()
+set(VULKAN_HEADERS_DIR ${DOJO_TOOLCHAIN}/deps/Vulkan-Headers)
+set(SHADER_COMPILER ${DOJO_TOOLCHAIN}/deps/glslang/bin/glslang.exe)
 
 # Each shader becomes a header holding its SPIR-V as an array, spv_<name>_<stage>.
 set(SHADER_HEADERS)
 foreach(shader draw.vert draw.frag quad.vert paint.frag present.frag overlay.frag)
     string(REPLACE "." "_" shader_name ${shader})
     set(shader_header ${GENERATED_DIR}/shaders/${shader_name}.h)
-    if(SHADER_COMPILER_KIND STREQUAL glslc)
-        # glslc writes the words alone; a header written here names them.
-        set(shader_words ${GENERATED_DIR}/shaders/${shader_name}.inc)
-        file(WRITE ${GENERATED_DIR}/shaders/${shader_name}_wrap.h
-            "static const uint32_t spv_${shader_name}[] = {
-#include \"${shader_name}.inc\"
-};
-")
-        set(shader_command ${SHADER_COMPILER} --target-env=vulkan1.3 -mfmt=num -o ${shader_words}
-            ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}
-            COMMAND ${CMAKE_COMMAND} -E copy ${GENERATED_DIR}/shaders/${shader_name}_wrap.h ${shader_header})
-    else()
-        set(shader_command ${SHADER_COMPILER} -V --target-env vulkan1.3 --vn spv_${shader_name} -o ${shader_header}
-            ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader})
-    endif()
+    set(shader_command ${SHADER_COMPILER} -V --target-env vulkan1.3 --vn spv_${shader_name} -o ${shader_header}
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader})
     add_custom_command(OUTPUT ${shader_header}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${GENERATED_DIR}/shaders
         COMMAND ${shader_command}
@@ -203,11 +175,13 @@ target_compile_definitions(dojo PRIVATE TARGET_PC _CRT_SECURE_NO_WARNINGS)
 target_compile_options(dojo PRIVATE -std=gnu11 -fno-strict-aliasing -fwrapv -fno-omit-frame-pointer)
 target_link_libraries(dojo PRIVATE dojo_game dojo_lib SDL3 ws2_32)
 add_custom_command(TARGET dojo POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SDL3_DIR}/lib/x86/SDL3.dll $<TARGET_FILE_DIR:dojo>)
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SDL3_DIR}/bin/SDL3.dll $<TARGET_FILE_DIR:dojo>)
+# Fixed at 0x400000 with no relocations (every address the game sees fits 24 bits), above 2 GB too (the console's
+# memory is mapped at 0x80000000), and the runtime linked in, so the program needs only Windows and SDL3.dll.
 target_link_options(dojo PRIVATE
-    -fuse-ld=lld
-    -Wl,/BASE:0x400000
-    -Wl,/FIXED
-    -Wl,/DYNAMICBASE:NO
-    -Wl,/LARGEADDRESSAWARE
-    -Wl,/ERRORLIMIT:0)
+    -Wl,--image-base,0x400000
+    -Wl,--disable-dynamicbase
+    -Wl,--disable-reloc-section
+    -Wl,--large-address-aware
+    -Wl,--error-limit=0
+    -static)

@@ -6,7 +6,7 @@
 #include <windows.h>
 #include "psxport.h"
 
-__declspec(align(4096)) unsigned char g_psxScratch[PSX_SCRATCH_SIZE + 16];
+__attribute__((aligned(4096))) unsigned char g_psxScratch[PSX_SCRATCH_SIZE + 16];
 
 int MemoryInit(void)
 {

@@ -16,11 +16,11 @@
 
 /* The markers: COFF orders grouped sections by the text after '$', and "sia" < "sim" < "siz". */
 #pragma clang section bss = ".bss$sia" data = ".data$sia"
-__declspec(align(16)) static char sDataBegin[16] = {1};
-__declspec(align(16)) static char sBssBegin[16];
+__attribute__((aligned(16))) static char sDataBegin[16] = {1};
+__attribute__((aligned(16))) static char sBssBegin[16];
 #pragma clang section bss = ".bss$siz" data = ".data$siz"
-__declspec(align(16)) static char sDataEnd[16] = {1};
-__declspec(align(16)) static char sBssEnd[16];
+__attribute__((aligned(16))) static char sDataEnd[16] = {1};
+__attribute__((aligned(16))) static char sBssEnd[16];
 #pragma clang section bss = "" data = ""
 
 #define IO_PAGE      0x1F801000u

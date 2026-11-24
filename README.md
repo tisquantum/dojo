@@ -18,49 +18,41 @@ disc image. Don't share builds of the game: `dojo.exe` contains the game's code.
 - **Your own disc image of Bushido Blade (USA)**, ripped as `.bin` + `.cue` (a raw 2352-byte-sector image;
   an `.iso` won't work). The file names don't matter. The launcher's **Verify disc** checks it against the
   known good copy (SHA-256 `c5cba1e3e8bc68f15e32492907ac37add7f8e8d3e10ddb36742a729ce1a970bf`).
-- **The Bushido Blade decompilation with Dojo's changes.** The game's code is built from it; it is not part of
-  this repository.
-- **Build tools** (free). The launcher checks for each and copies the install command for anything missing;
-  paste it into a terminal:
+- **An internet connection the first time**, to download the game's decompiled source (a few MB).
 
-  | Tool | Install |
-  |---|---|
-  | Python 3 (also runs the launcher) | `winget install Python.Python.3.12` |
-  | Clang (LLVM) | `winget install LLVM.LLVM` |
-  | Visual Studio C++ build tools | `winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"` |
-  | CMake | `winget install Kitware.CMake` |
-  | Ninja | `winget install Ninja-build.Ninja` |
-  | Vulkan SDK (optional) | `winget install KhronosGroup.VulkanSDK` |
+Nothing else: the release carries every tool it builds with. The game itself is built on your PC, from the
+decompiled source and your disc, because a finished game can't be shared.
 
-  The first build also downloads SDL 3 and the Vulkan headers (checked by SHA-256), so it needs internet.
+### Playing with the launcher
 
-### With the launcher (recommended)
-
-1. Install the tools above, then double-click **`launcher.pyw`** in this folder (or run `python launcher.pyw`).
-2. **Game** tab: under *Disc image*, choose your `.cue`, `.bin` or the folder holding them (**File...** or
-   **Folder...**). Optionally press **Verify disc**. Under *Decompilation folder*, choose the decompilation.
-3. **Settings** tab: pick your frame rate, screen shape, resolution, full screen and so on, and your name for
+1. Download `Dojo-<version>-windows.zip` from the [Releases](https://github.com/tisquantum/dojo/releases) page
+   and unzip it anywhere (keep the whole folder together).
+2. Open **`Dojo.exe`**. Windows SmartScreen may warn about an unsigned app: **More info → Run anyway**.
+3. **Game** tab: under *Disc image*, choose your `.cue`, `.bin` or the folder holding them (**File...** or
+   **Folder...**). Optionally press **Verify disc**.
+4. **Settings** tab: pick your frame rate, screen shape, resolution, full screen and so on, and your name for
    online play. Everything saves as you change it.
-4. Press **Play**. The first time, it builds the game (a few minutes; the **Build** tab shows progress and
-   anything missing). After that, Play starts the game straight away; with *Build before playing* ticked it
-   picks up any code changes first, which takes a second when there are none.
+5. Press **Play**. The first time it downloads the decompiled source and builds the game (a few minutes; the
+   **Build** tab shows progress). After that, Play starts the game straight away.
 
 If the game closes with an error, its last output appears in the **Build** tab, and **Open game log** opens
-`dojo.log`.
+`dojo.log`. Your saves are in `saves/` and your settings in `build/dojo.ini`; keep those two when moving to a
+new version.
 
 ### Without the launcher
 
-In this folder:
+In the release folder (or a checkout with the toolchain, see below):
 
 ```
-cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
+toolchain\cmakein\cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ^
       -DDOJO_DECOMP_DIR=<decompilation folder> -DDOJO_DISC=<your disc .bin>
-cmake --build build
+toolchain\cmakein\cmake --build build
 build\dojo.exe "<your disc .bin>"
 ```
 
-Without `-DDOJO_DECOMP_DIR` the build looks for the decompilation in the folder above this one. Started without a disc path, `dojo.exe` looks for `game_files/Bushido Blade (USA).bin` in the folder it is
-started from or the two above it.
+The decompilation is the `dojo` branch of [tisquantum/bushido](https://github.com/tisquantum/bushido/tree/dojo)
+(the launcher fetches the exact commit its version was made with). Started without a disc path, `dojo.exe`
+looks for `game_files/Bushido Blade (USA).bin` in the folder it is started from or the two above it.
 
 ### Controls
 
@@ -115,6 +107,14 @@ Matches use rollback netcode, and players with different refresh rates can play 
 off during online matches; your own game is set aside and comes back after.
 
 ## For developers
+
+Working from a checkout of this repository: `python tools/fetch_toolchain.py` downloads the toolchain into
+`toolchain/` (llvm-mingw for 32-bit x86, CMake, Ninja, embeddable Python, SDL3, the Vulkan headers and glslang,
+each checked by SHA-256), then `python launcher.pyw` works as the release's `Dojo.exe` does. Everyone builds
+with the same tools and the build is reproducible (no timestamps or folder names in the program), so a given
+version builds to the same bytes on every PC, which online play relies on. `python tools/make_release.py`
+makes the release zip in `dist/` (it needs PyInstaller for `Dojo.exe`). Releases build `Release`;
+`RelWithDebInfo` adds a PDB for crash addresses and `tools/statediff.py`.
 
 ### State
 

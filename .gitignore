@@ -25,3 +25,9 @@ state_*.bin
 launcher.json
 saves/
 *.log
+
+# The bundled toolchain (tools/fetch_toolchain.py), the downloaded decompilation, and release packaging.
+toolchain/
+decomp/
+decomp.new/
+dist/
