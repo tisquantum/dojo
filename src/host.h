@@ -5,8 +5,10 @@
 
 /* Called by the kernel layer at each emulated vertical blank: switches to the host until the next field. */
 void HostVerticalBlank(void);
-/* Called at each vertical blank to write the controllers into the game's receive buffers. */
+/* Writes the controllers into the game's receive buffers, before each tick: a press counts from the next. */
 void HostFillPads(void);
+/* This machine's controller as the game should see it now (netplay.c samples it before each tick). */
+unsigned HostLocalButtons(void);
 void HostWritePadPort(int port, int connected, unsigned buttons, const unsigned char analog[4]);
 void HostSetRumbleBuffers(unsigned char *bufA, long lenA, unsigned char *bufB, long lenB);
 /* Queues interleaved stereo samples at 44.1 kHz for the audio output. */

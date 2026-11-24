@@ -7,9 +7,14 @@
  * has, and when the real input arrives and differs, it loads the state saved before that field and runs
  * forward again with drawing and sound left out.
  *
+ * A field's input is a sample of the controller for each of its ticks (NetplaySamplesPerField: one at 60 fps,
+ * four at 240), written to the game before that tick, so a press counts from the next tick, not the next
+ * field. This machine samples its own before each tick it runs, for the same tick `delay` fields on.
+ *
  * Packets are UDP and carry every input the other machine has not acknowledged, so a lost packet costs
- * nothing; each also carries the sender's newest field, for keeping the two in step, and from time to
- * time the hash of a field both have settled, for noticing a desync. */
+ * nothing (each field as its first sample and the ticks it changes at); each also carries the sender's newest
+ * field, for keeping the two in step, and from time to time the hash of a field both have settled, for
+ * noticing a desync. */
 
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -21,15 +26,17 @@
 #include "kernel_port.h"
 #include "context.h"
 #include "host.h"
+#include "pc_substep.h"
 #include "netplay.h"
 #include "savestate.h"
 #include "spu.h"
 
 #define MAGIC          0x504E4242u /* "BBNP" */
-#define VERSION        4
+#define VERSION        5
 #define RING           64          /* fields of inputs and states kept */
 #define MAX_ROLLBACK   12          /* how far a machine may run on predictions */
-#define MAX_SEND       60
+#define MAX_SEND       60          /* fields a packet carries at most */
+#define MAX_SEND_BYTES 400         /* and their encoding's bytes (online.c queues packets of 512) */
 #define HASH_INTERVAL  30
 
 enum { PACKET_HELLO = 1, PACKET_WELCOME = 2, PACKET_INPUT = 3 };
@@ -57,7 +64,7 @@ typedef struct InputPacket {
     uint32_t sentMs, echoMs;
     uint32_t hashField;   /* a settled field and the hash of the state before it, or 0 */
     uint64_t hash;
-    uint16_t inputs[MAX_SEND];
+    uint8_t inputs[MAX_SEND_BYTES]; /* `count` fields: the first sample, the changes, (tick, sample) each */
 } InputPacket;
 #pragma pack(pop)
 
@@ -71,10 +78,11 @@ static struct {
     uint32_t info[RING];     /* each field's game state and bout winner after it ran (NetplaySettled) */
     int local;               /* this machine's controller port: 0 hosting, 1 joining */
     int delay;
+    int samples;             /* controller samples a field (NetplaySamplesPerField) */
     uint32_t field;          /* the next field to run */
-    uint16_t localInputs[RING];
-    uint16_t remoteInputs[RING];
-    uint16_t usedRemote[RING];
+    uint16_t localInputs[RING][NETPLAY_MAX_SAMPLES];
+    uint16_t remoteInputs[RING][NETPLAY_MAX_SAMPLES];
+    uint16_t usedRemote[RING][NETPLAY_MAX_SAMPLES];
     uint32_t remoteKnown;    /* every remote input before this field has arrived */
     uint32_t remoteAcked;    /* every local input before this field has arrived there */
     uint32_t remoteNewest;
@@ -147,9 +155,16 @@ static int SocketReceive(void *buffer, int capacity)
 }
 
 /* The ring and counters of a session starting at field 0. */
-static void BeginSession(void)
+int NetplaySamplesPerField(int ticksPerFrame)
+{
+    int samples = (ticksPerFrame + 1) / 2; /* a console frame is two fields */
+    return samples < 1 ? 1 : (samples > NETPLAY_MAX_SAMPLES ? NETPLAY_MAX_SAMPLES : samples);
+}
+
+static void BeginSession(int ticksPerFrame)
 {
     int i;
+    N.samples = NetplaySamplesPerField(ticksPerFrame);
     for (i = 0; i < RING; i++) {
         if (!N.states[i]) {
             N.states[i] = SDL_malloc(SaveStateCapacity());
@@ -187,8 +202,9 @@ void NetplayBegin(const NetplayTransport *transport, int local, int delay)
         N.lossPercent = (text = SDL_getenv("DOJO_NET_LOSS")) ? atoi(text) : 0;
         N.lagMs = (text = SDL_getenv("DOJO_NET_LAG")) ? atoi(text) : 0;
     }
-    BeginSession();
-    fprintf(stderr, "netplay: session as player %d, input delay %d fields\n", N.local + 1, N.delay);
+    BeginSession(g_pcTicksPerFrame);
+    fprintf(stderr, "netplay: session as player %d, input delay %d fields, %d samples a field\n", N.local + 1,
+            N.delay, N.samples);
 }
 
 void NetplayEnd(void)
@@ -351,8 +367,9 @@ int NetplayStart(int simMargin, int ticksPerFrame, int *agreedMargin, int *agree
     *agreedTicks = (int)reply.ticks > ticksPerFrame ? (int)reply.ticks : ticksPerFrame;
     N.send = SocketSend;
     N.receive = SocketReceive;
-    BeginSession();
-    fprintf(stderr, "netplay: connected as player %d, input delay %d fields\n", N.local + 1, N.delay);
+    BeginSession(*agreedTicks);
+    fprintf(stderr, "netplay: connected as player %d, input delay %d fields, %d samples a field\n", N.local + 1,
+            N.delay, N.samples);
     return 1;
 }
 
@@ -361,13 +378,19 @@ int NetplayActive(void)
     return N.active;
 }
 
-static uint16_t RemoteInputFor(uint32_t field)
+/* The other machine's samples for a field: known, or predicted, all as the newest sample known before it. */
+static void RemoteInputFor(uint32_t field, uint16_t *out)
 {
-    /* Known, or predicted: the newest input known before it. */
+    int i;
+    uint16_t last;
     if (field < N.remoteKnown) {
-        return N.remoteInputs[field % RING];
+        memcpy(out, N.remoteInputs[field % RING], sizeof(N.remoteInputs[0]));
+        return;
     }
-    return N.remoteKnown > 0 ? N.remoteInputs[(N.remoteKnown - 1) % RING] : 0;
+    last = N.remoteKnown > 0 ? N.remoteInputs[(N.remoteKnown - 1) % RING][N.samples - 1] : 0;
+    for (i = 0; i < NETPLAY_MAX_SAMPLES; i++) {
+        out[i] = last;
+    }
 }
 
 unsigned NetplayFilterButtons(unsigned buttons)
@@ -376,23 +399,28 @@ unsigned NetplayFilterButtons(unsigned buttons)
     return gGameState == 2 /* GAME_STATE_UPDATE_COMBAT */ ? buttons & ~(1u << 11) : buttons;
 }
 
-/* Runs one field: saves the state before it, writes both controllers, and lets the game run to the next
- * vertical blank, through any ticks that end before it (each shown, unless the field is run again after a
- * rollback, which is neither drawn nor heard). */
+/* Runs one field: saves the state before it, and lets the game run to the next vertical blank, through any
+ * ticks that end before it, each with both controllers written from its samples (each shown, unless the field
+ * is run again after a rollback, which is neither drawn nor heard). Run for the first time, it samples this
+ * machine's controller before each tick after the first, for the field `delay` on. */
 static void RunGameField(uint32_t field, int again)
 {
     uint8_t *state = N.states[field % RING];
-    uint16_t remote = RemoteInputFor(field);
-    uint16_t local = N.localInputs[field % RING];
+    const uint16_t *local = N.localInputs[field % RING];
+    uint16_t *remote = N.usedRemote[field % RING];
     const int16_t *samples;
-    int frames;
+    int frames, tick;
 
     SaveStateSave(state);
     N.stateField[field % RING] = field;
-    N.usedRemote[field % RING] = remote;
-    HostWritePadPort(N.local, 1, NetplayFilterButtons(local), NULL);
-    HostWritePadPort(1 - N.local, 1, NetplayFilterButtons(remote), NULL);
-    for (;;) {
+    RemoteInputFor(field, remote);
+    for (tick = 0;; tick++) {
+        int sample = tick < N.samples ? tick : N.samples - 1;
+        if (!again && tick > 0 && tick < N.samples) {
+            N.localInputs[(field + (uint32_t)N.delay) % RING][tick] = (uint16_t)HostLocalButtons();
+        }
+        HostWritePadPort(N.local, 1, NetplayFilterButtons(local[sample]), NULL);
+        HostWritePadPort(1 - N.local, 1, NetplayFilterButtons(remote[sample]), NULL);
         ContextSwitchToGame();
         if (KernelLastYieldWasBlank()) {
             break;
@@ -422,17 +450,40 @@ static void Receive(void)
             continue;
         }
         N.lastHeardMs = NowMs();
-        for (i = 0; i < p.count && i < MAX_SEND; i++) {
-            uint32_t field = p.first + i;
-            if (field < N.remoteKnown || field != N.remoteKnown) {
-                continue; /* had it already, or a gap: inputs are taken in order */
-            }
-            N.remoteInputs[field % RING] = p.inputs[i];
-            N.remoteKnown = field + 1;
-            /* A field already run on a prediction that was wrong: run again from there. */
-            if (field < N.field && N.stateField[field % RING] == field && N.usedRemote[field % RING] != p.inputs[i] &&
-                field < N.rollbackFrom) {
-                N.rollbackFrom = field;
+        {
+            const uint8_t *in = p.inputs, *end = (const uint8_t *)&p + got;
+            for (i = 0; i < p.count && i < MAX_SEND; i++) {
+                uint32_t field = p.first + i;
+                uint16_t decoded[NETPLAY_MAX_SAMPLES];
+                int changes, c, t;
+                if (in + 3 > end) {
+                    break;
+                }
+                decoded[0] = (uint16_t)(in[0] | in[1] << 8);
+                changes = in[2];
+                in += 3;
+                if (in + changes * 3 > end) {
+                    break;
+                }
+                for (t = 1; t < NETPLAY_MAX_SAMPLES; t++) {
+                    decoded[t] = decoded[0];
+                }
+                for (c = 0; c < changes; c++, in += 3) {
+                    for (t = in[0]; t > 0 && t < NETPLAY_MAX_SAMPLES; t++) {
+                        decoded[t] = (uint16_t)(in[1] | in[2] << 8);
+                    }
+                }
+                if (field != N.remoteKnown) {
+                    continue; /* had it already, or a gap: inputs are taken in order */
+                }
+                memcpy(N.remoteInputs[field % RING], decoded, sizeof(decoded));
+                N.remoteKnown = field + 1;
+                /* A field already run on a prediction that was wrong: run again from there. */
+                if (field < N.field && N.stateField[field % RING] == field &&
+                    memcmp(N.usedRemote[field % RING], decoded, (size_t)N.samples * sizeof(uint16_t)) != 0 &&
+                    field < N.rollbackFrom) {
+                    N.rollbackFrom = field;
+                }
             }
         }
         if (p.ack > N.remoteAcked) {
@@ -450,6 +501,17 @@ static void Receive(void)
             N.hashes[p.hashField % RING] != p.hash && !N.desync[0]) {
             snprintf(N.desync, sizeof(N.desync), "DESYNC at field %lu", (unsigned long)p.hashField);
             fprintf(stderr, "netplay: %s\n", N.desync);
+            if (SDL_getenv("DOJO_DUMP_DESYNC") && N.stateField[p.hashField % RING] == p.hashField) {
+                /* This machine's state before that field, for tools/statediff.py against the other's. */
+                char name[64];
+                FILE *f;
+                snprintf(name, sizeof(name), "desync_p%d_%06lu.bin", N.local + 1, (unsigned long)p.hashField);
+                if ((f = fopen(name, "wb")) != NULL) {
+                    fwrite(N.states[p.hashField % RING], 1, SaveStateCapacity(), f);
+                    fclose(f);
+                    SaveStatePrintRegions(stderr);
+                }
+            }
         }
     }
 }
@@ -459,6 +521,7 @@ static void Send(void)
     InputPacket p;
     uint32_t newestLocal = N.field + (uint32_t)N.delay; /* local inputs exist up to here */
     uint32_t first = N.remoteAcked, count;
+    int used = 0;
     memset(&p, 0, sizeof(p));
     if (newestLocal - first > MAX_SEND) {
         first = newestLocal - MAX_SEND;
@@ -466,17 +529,39 @@ static void Send(void)
     count = newestLocal - first;
     p.magic = MAGIC;
     p.type = PACKET_INPUT;
-    p.count = (uint16_t)count;
     p.first = first;
     p.ack = N.remoteKnown;
     p.newest = N.field;
     p.sentMs = NowMs();
     p.echoMs = N.peerSentMs ? N.peerSentMs + (NowMs() - N.peerSentAt) : 0;
     {
+        /* Each field: its first sample, then each tick its sample changes at, as far as the bytes allow. */
         uint32_t i;
         for (i = 0; i < count; i++) {
-            p.inputs[i] = N.localInputs[(first + i) % RING];
+            const uint16_t *in = N.localInputs[(first + i) % RING];
+            uint8_t *out = p.inputs + used;
+            int t, changes = 0;
+            for (t = 1; t < N.samples; t++) {
+                changes += in[t] != in[t - 1];
+            }
+            if (used + 3 + changes * 3 > MAX_SEND_BYTES) {
+                break;
+            }
+            out[0] = (uint8_t)in[0];
+            out[1] = (uint8_t)(in[0] >> 8);
+            out[2] = (uint8_t)changes;
+            out += 3;
+            for (t = 1; t < N.samples; t++) {
+                if (in[t] != in[t - 1]) {
+                    out[0] = (uint8_t)t;
+                    out[1] = (uint8_t)in[t];
+                    out[2] = (uint8_t)(in[t] >> 8);
+                    out += 3;
+                }
+            }
+            used += 3 + changes * 3;
         }
+        p.count = (uint16_t)i;
     }
     /* The hash of the newest settled field on the interval: both machines have every input before it. */
     {
@@ -490,13 +575,25 @@ static void Send(void)
                 fprintf(stderr, "netplay: settled field %lu hash %016llx\n", (unsigned long)h,
                         (unsigned long long)N.hashes[h % RING]);
             }
+            if (SDL_getenv("DOJO_DUMP_SETTLED") && (strtoul(SDL_getenv("DOJO_DUMP_SETTLED"), NULL, 10) == h ||
+                                                   (SDL_getenv("DOJO_DUMP_SETTLED")[0] == 'a' && h <= 600))) {
+                /* the state before that settled field, for tools/statediff.py (a spectator's: DOJO_DUMP_WATCH) */
+                char name[64];
+                FILE *f;
+                snprintf(name, sizeof(name), "settled_p%d_%06lu.bin", N.local + 1, (unsigned long)h);
+                if ((f = fopen(name, "wb")) != NULL) {
+                    fwrite(N.states[h % RING], 1, SaveStateCapacity(), f);
+                    fclose(f);
+                    SaveStatePrintRegions(stderr);
+                }
+            }
         }
         if (N.lastHashSent && N.hashedField[N.lastHashSent % RING] == N.lastHashSent) {
             p.hashField = N.lastHashSent;
             p.hash = N.hashes[N.lastHashSent % RING];
         }
     }
-    SendRaw(&p, (int)offsetof(InputPacket, inputs) + (int)(count * sizeof(uint16_t)));
+    SendRaw(&p, (int)offsetof(InputPacket, inputs) + used);
 }
 
 int NetplayRunField(unsigned localButtons)
@@ -504,8 +601,14 @@ int NetplayRunField(unsigned localButtons)
     int advanced = 0;
 
     FlushLagged();
-    /* This machine's input, `delay` fields ahead of the field it is for. */
-    N.localInputs[(N.field + (uint32_t)N.delay) % RING] = (uint16_t)localButtons;
+    /* This machine's input, `delay` fields ahead of the field it is for: its first tick's sample, and the
+     * rest's until the ticks before them take their own (RunGameField). */
+    {
+        int t;
+        for (t = 0; t < NETPLAY_MAX_SAMPLES; t++) {
+            N.localInputs[(N.field + (uint32_t)N.delay) % RING][t] = (uint16_t)localButtons;
+        }
+    }
     Receive();
 
     if (N.rollbackFrom != UINT32_MAX) {
@@ -557,6 +660,11 @@ int NetplayCardsOff(void)
     return N.active || sCardsOff;
 }
 
+int NetplayOnlineSimulation(void)
+{
+    return N.active || sCardsOff;
+}
+
 void NetplaySetCardsOff(int off)
 {
     sCardsOff = off;
@@ -572,13 +680,13 @@ uint32_t NetplaySettledFields(void)
 
 int NetplayInputsAt(uint32_t field, uint16_t *port0, uint16_t *port1)
 {
-    uint16_t local, remote;
+    const uint16_t *local, *remote;
     if (!N.active || field >= NetplaySettledFields() || field + RING <= N.field + (uint32_t)N.delay) {
         return 0;
     }
     local = N.localInputs[field % RING];
     remote = N.remoteInputs[field % RING];
-    *port0 = N.local == 0 ? local : remote;
-    *port1 = N.local == 0 ? remote : local;
-    return 1;
+    memcpy(port0, N.local == 0 ? local : remote, (size_t)N.samples * sizeof(uint16_t));
+    memcpy(port1, N.local == 0 ? remote : local, (size_t)N.samples * sizeof(uint16_t));
+    return N.samples;
 }

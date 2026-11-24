@@ -149,8 +149,10 @@ Press **F1** in the game and choose **Play online**:
 - **King of the Hill**: the winner stays on and challengers wait in line, watching the current fight. Public,
   or private by code.
 
-Matches use rollback netcode, and players with different refresh rates can play each other. Memory cards are
-off during online matches; your own game is set aside and comes back after.
+Matches use rollback netcode, and players with different refresh rates can play each other. The input delay
+follows the connection (0 on a LAN), and the controllers are read before every tick of the simulation, so at
+a high frame rate a press counts within a few milliseconds, online as well as off. Pausing is off in an
+online fight. Memory cards are off during online matches; your own game is set aside and comes back after.
 
 ## For developers
 
@@ -172,7 +174,7 @@ the title menu, character and weapon select, the Story prologue, VS bouts, and t
 Movie Theater, the endings) with their sound. A Vulkan renderer draws at
 any multiple of the console's resolution with sub-pixel geometry, in any aspect ratio. Combat runs natively at
 the display's rate (60, 120, 144, 165 and up: the game's own logic, more often, not frames in between). Two
-machines play online with rollback, at different refresh rates too. Not yet: rumble.
+machines play online with rollback, at different refresh rates too.
 
 ### Options, online and testing in detail
 
@@ -214,7 +216,13 @@ builds and lists what the link still lacks. Scripted runs use environment variab
 `koth:CODE`: online play from a script), `DOJO_SERVER`, `DOJO_NO_DIRECT` (always relay), `DOJO_MENU_AT` (open the options menu at a field and save its
 picture), `DOJO_APPLY_AT` (`field:scale=N,field:vsync=N,field:fps=N`, settings changed mid-run), `DOJO_HASH_EVERY` (log the simulation's hash), `DOJO_STATE_TEST=F,G`
 (save at F, run to G, restore and run again, compare), `DOJO_DUMP_STATE=F` (the state, its regions on
-stderr). `tools/statediff.py` compares two dumps variable by variable through the builds' PDBs (pointers by
+stderr), `DOJO_DUMP_DESYNC` (netplay saves its state before a field the two machines disagree on, as
+`desync_p<player>_<field>.bin`), `DOJO_PRESS_TICKS=seed` (the local controller changes from one tick's
+sample to the next, for testing netplay's per-tick input), `DOJO_DUMP_SETTLED=field` and `DOJO_DUMP_WATCH=field`
+(a player's settled state before that field, a spectator's; `all` for every checked field to 600), and
+`DOJO_HIDDEN` (no window on the screen, the software renderer and the default settings, dojo.ini neither read
+nor written: for tests run while someone uses the machine). Release builds write no PDB, so for
+`tools/statediff.py` build RelWithDebInfo, or the names it gives come from an older build. `tools/statediff.py` compares two dumps variable by variable through the builds' PDBs (pointers by
 what they name), so a build can be checked against an older one even when variables were added.
 `-DDOJO_TRACE=ON` keeps a call stack of the game's functions for crash reports; crashes print addresses to
 resolve with `llvm-symbolizer --obj=port/build/dojo.exe`.

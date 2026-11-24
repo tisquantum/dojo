@@ -36,7 +36,7 @@ DECOMP_DIR = os.path.join(PORT_DIR, "decomp")
 
 # The decompilation, with Dojo's changes, this version is built from: a branch of a fork of the decompilation,
 # fetched at this exact commit.
-DECOMP_COMMIT = "6ed46c44c2c5134a2ff15604e60b744388737c71"
+DECOMP_COMMIT = "78eae5c9112df23e3a38ce7315c8b48de871c1a5"
 DECOMP_URL = "https://github.com/tisquantum/bushido/archive/%s.zip" % DECOMP_COMMIT
 DECOMP_STAMP = ".dojo-decomp"
 BUILD_DIR = os.path.join(PORT_DIR, "build")

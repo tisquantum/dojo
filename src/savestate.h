@@ -18,5 +18,10 @@ uint64_t SaveStateHash(void);
 uint64_t SaveStateHashState(const uint8_t *state);
 /* Prints the regions a save state holds, in order, with their addresses (for debugging). */
 void SaveStatePrintRegions(FILE *out);
+/* An emulated stack in the simulation's sections (the translated assembly's, tools/mips2c.py), whose words
+ * below the stack pointer `*sp` (0: none in use) are dead: before a save or a hash they are cleared, so what
+ * was left there (host addresses among it, which differ from machine to machine) doesn't make two machines'
+ * identical games hash differently. */
+void SaveStateAddDeadStack(void *base, unsigned size, const unsigned *sp);
 
 #endif

@@ -62,6 +62,33 @@ size_t SaveStateCapacity(void)
     return total + (size_t)((uint8_t *)high - (uint8_t *)low) + 16;
 }
 
+static struct {
+    uint8_t *base;
+    unsigned size;
+    const unsigned *sp;
+} sDeadStacks[8];
+static int sDeadStackCount;
+
+void SaveStateAddDeadStack(void *base, unsigned size, const unsigned *sp)
+{
+    if (sDeadStackCount < (int)(sizeof(sDeadStacks) / sizeof(sDeadStacks[0]))) {
+        sDeadStacks[sDeadStackCount].base = base;
+        sDeadStacks[sDeadStackCount].size = size;
+        sDeadStacks[sDeadStackCount].sp = sp;
+        sDeadStackCount++;
+    }
+}
+
+static void ClearDeadStacks(void)
+{
+    int i;
+    for (i = 0; i < sDeadStackCount; i++) {
+        uintptr_t base = (uintptr_t)sDeadStacks[i].base, sp = *sDeadStacks[i].sp;
+        size_t dead = sp > base && sp <= base + sDeadStacks[i].size ? sp - base : sDeadStacks[i].size;
+        memset(sDeadStacks[i].base, 0, dead);
+    }
+}
+
 size_t SaveStateSave(uint8_t *out)
 {
     Region r[5];
@@ -70,6 +97,7 @@ size_t SaveStateSave(uint8_t *out)
     void *sp = ContextGameStackPointer(), *low, *high;
     size_t used;
 
+    ClearDeadStacks();
     for (i = 0; i < n; i++) {
         memcpy(p, r[i].base, r[i].size);
         p += r[i].size;
@@ -137,6 +165,7 @@ uint64_t SaveStateHash(void)
     int i, n = Regions(r);
     uint64_t h = 0xCBF29CE484222325ull;
     (void)n;
+    ClearDeadStacks();
     for (i = 0; i < HASHED_REGIONS; i++) {
         h = HashBytes(h, r[i].base, r[i].size);
     }

@@ -6,6 +6,11 @@
 
 #include <stdint.h>
 
+/* A field's input is a controller sample for each of its ticks, at most this many (480 fps). */
+#define NETPLAY_MAX_SAMPLES 8
+/* The samples a field has at a simulation rate (ticks per console frame, two fields): 1 at 60 fps, 4 at 240. */
+int NetplaySamplesPerField(int ticksPerFrame);
+
 /* Starts a session from DOJO_NET ("host:PORT" or "join:ADDRESS:PORT"); returns 0 when there is none.
  * Blocks until the other machine answers. `simMargin` is this machine's widescreen setting (psxport.h) and
  * `ticksPerFrame` its simulation rate (pc_substep.h); both use the wider and the faster. */
@@ -37,9 +42,14 @@ int NetplaySettled(int *gameState, int *winnerSide);
 int NetplayIsSessionPacket(const void *data, int size);
 /* Memory cards are absent in an online session, and while online play prepares the state it starts from. */
 int NetplayCardsOff(void);
+/* An online match is simulated here: played, watched from the hill's log, or its starting state prepared. The
+ * game turns off there what isn't in an online match (src/menu_state.c), the same on every machine. */
+int NetplayOnlineSimulation(void);
 /* For spectators (online.c): how many fields from the session's start both machines have every input for,
  * and the two controllers' inputs of one of them while the ring still holds it (returns 0 when not). */
 uint32_t NetplaySettledFields(void);
+/* A settled field's samples for each controller (NetplaySamplesPerField of the match's rate, written to
+ * port0 and port1); returns how many, or 0 if the field isn't settled or has left the ring. */
 int NetplayInputsAt(uint32_t field, uint16_t *port0, uint16_t *port1);
 void NetplaySetCardsOff(int off);
 /* Runs one field of the session: sends and receives inputs, rolls back if a prediction was wrong, and

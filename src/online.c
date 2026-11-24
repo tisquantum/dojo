@@ -41,8 +41,9 @@
 #define DELAY_DECIDE_MS 4000   /* setup decides its input delay by then, measured or not */
 /* Raised whenever a change makes the same inputs play out differently (the game's code, not its data, so the
  * starting state's hash alone can't tell): mixed into that hash, it turns away a player on another version.
- * 2: rain and foliage across the widescreen margin (0.1.5). 3: no pausing in a fight (0.1.6). */
-#define SIM_REVISION    3
+ * 2: rain and foliage across the widescreen margin (0.1.5). 3: no pausing in a fight (0.1.6). 4: the controllers sampled before
+ * every tick, not each field (0.1.6). */
+#define SIM_REVISION    4
 #define PUNCH_MS        150
 #define RELAY_AFTER_MS  1500 /* no direct answer by then: through the server */
 #define SETUP_GIVE_UP_MS 20000
@@ -50,7 +51,7 @@
 #define PING_MS         2000
 #define SERVER_SILENCE_MS 20000
 #define PREPARE_FIELDS_PER_CALL 120
-#define SPECTATE_BATCH  120   /* fields a log packet carries */
+#define SPECTATE_BATCH  120   /* samples a log packet carries (NetplaySamplesPerField a field) */
 #define PUSH_MS         100   /* how often a player sends the log's new fields */
 #define WATCH_MS        100   /* how often a spectator asks for what it lacks */
 #define WATCH_BEHIND    60    /* fields a spectator stays behind the newest it has, against stalls */
@@ -996,25 +997,30 @@ static void PushLog(void)
     char packet[sizeof(SpectateHeader) + SPECTATE_BATCH * 4];
     SpectateHeader *h = (SpectateHeader *)packet;
     uint32_t *words = (uint32_t *)(packet + sizeof(SpectateHeader));
-    uint32_t settled = NetplaySettledFields(), now = NowMs(), f;
+    /* The log is the server's, in samples (pushAcked counts them); this machine pushes whole fields. */
+    uint32_t samples = (uint32_t)NetplaySamplesPerField(O.ticks);
+    uint32_t settled = NetplaySettledFields(), now = NowMs(), f, first = O.pushAcked / samples;
     uint16_t count = 0;
-    if (now - O.lastPushMs < PUSH_MS || O.pushAcked >= settled) {
+    if (now - O.lastPushMs < PUSH_MS || first >= settled) {
         return;
     }
     O.lastPushMs = now;
-    for (f = O.pushAcked; f < settled && count < SPECTATE_BATCH; f++) {
-        uint16_t a, b;
-        if (!NetplayInputsAt(f, &a, &b)) {
+    for (f = first; f < settled && count + samples <= SPECTATE_BATCH; f++) {
+        uint16_t a[NETPLAY_MAX_SAMPLES], b[NETPLAY_MAX_SAMPLES];
+        uint32_t i;
+        if (!NetplayInputsAt(f, a, b)) {
             break; /* fallen out of the ring: those watching will stop where it ends */
         }
-        words[count++] = a | (uint32_t)b << 16;
+        for (i = 0; i < samples; i++) {
+            words[count++] = a[i] | (uint32_t)b[i] << 16;
+        }
     }
     if (!count) {
         return;
     }
     memcpy(h->magic, "BBSP", 4);
     h->matchId = O.matchId;
-    h->first = O.pushAcked;
+    h->first = first * samples;
     h->count = count;
     h->ticks = (uint16_t)O.ticks;
     h->total = 0;
@@ -1149,20 +1155,46 @@ int OnlineWantsToWatch(void)
     return O.W.on && g_settings.watch && O.start && O.state == ONLINE_WAITING;
 }
 
-/* One field of the watched fight, with its ticks shown and its sound played, unless `quietly`. */
+/* The log's samples a field, at the watched match's rate. */
+static uint32_t WatchSamples(void)
+{
+    return (uint32_t)NetplaySamplesPerField(O.W.ticks);
+}
+
+/* One field of the watched fight, its ticks' samples written before each, its ticks shown and its sound
+ * played, unless `quietly`. O.W.next counts samples, as the log does. */
 static void RunWatchedField(int quietly)
 {
-    uint32_t pads = O.W.log[O.W.next];
-    const int16_t *samples;
-    int frames;
-    if (O.W.next % 30 == 0 && O.W.next && SDL_getenv("DOJO_HASH_EVERY")) {
+    const uint32_t *pads = &O.W.log[O.W.next];
+    uint32_t samples = WatchSamples(), field = O.W.next / samples;
+    const int16_t *audio;
+    int frames, tick;
+    if (SDL_getenv("DOJO_DUMP_WATCH") && field % 30 == 0 &&
+        (strtoul(SDL_getenv("DOJO_DUMP_WATCH"), NULL, 10) == field || (SDL_getenv("DOJO_DUMP_WATCH")[0] == 'a' && field <= 600)) &&
+        O.W.next % samples == 0) {
+        /* the state before the watched field, as a player's DOJO_DUMP_SETTLED saves it */
+        uint8_t *state = SDL_malloc(SaveStateCapacity());
+        char name[64];
+        FILE *f;
+        snprintf(name, sizeof(name), "watch_%06lu.bin", (unsigned long)field);
+        f = fopen(name, "wb");
+        SaveStateSave(state);
+        if (f) {
+            fwrite(state, 1, SaveStateCapacity(), f);
+            fclose(f);
+        }
+        SDL_free(state);
+        SaveStatePrintRegions(stderr);
+    }
+    if (field % 30 == 0 && field && SDL_getenv("DOJO_HASH_EVERY")) {
         /* the hash the players' netplay logs for the same field: they must agree */
         fprintf(stderr, "watch: match %lu field %lu hash %016llx\n", (unsigned long)O.W.matchId,
-                (unsigned long)O.W.next, (unsigned long long)SaveStateHash());
+                (unsigned long)field, (unsigned long long)SaveStateHash());
     }
-    HostWritePadPort(0, 1, NetplayFilterButtons(pads & 0xFFFF), NULL);
-    HostWritePadPort(1, 1, NetplayFilterButtons(pads >> 16), NULL);
-    for (;;) {
+    for (tick = 0;; tick++) {
+        uint32_t word = pads[(uint32_t)tick < samples ? (uint32_t)tick : samples - 1];
+        HostWritePadPort(0, 1, NetplayFilterButtons(word & 0xFFFF), NULL);
+        HostWritePadPort(1, 1, NetplayFilterButtons(word >> 16), NULL);
         ContextSwitchToGame();
         if (KernelLastYieldWasBlank()) {
             break;
@@ -1171,11 +1203,11 @@ static void RunWatchedField(int quietly)
             HostPresentTick();
         }
     }
-    samples = SpuTakeFieldAudio(&frames);
+    audio = SpuTakeFieldAudio(&frames);
     if (!quietly && frames) {
-        HostQueueAudio(samples, frames);
+        HostQueueAudio(audio, frames);
     }
-    O.W.next++;
+    O.W.next += samples;
 }
 
 int OnlineWatchField(void)
@@ -1203,14 +1235,15 @@ int OnlineWatchField(void)
         O.W.running = 1;
         O.W.next = 0;
     }
-    /* Far behind (joined late): run on unseen to near the newest. */
-    if (O.W.have > O.W.next + WATCH_CATCH_UP) {
-        while (O.W.next + WATCH_BEHIND < O.W.have) {
+    /* Far behind (joined late): run on unseen to near the newest. (In samples: the WATCH_ counts are fields.) */
+    if (O.W.have > O.W.next + WATCH_CATCH_UP * WatchSamples()) {
+        while (O.W.next + WATCH_BEHIND * WatchSamples() < O.W.have) {
             RunWatchedField(1);
         }
         HostResetPacing();
     }
-    if (O.W.next < O.W.have && (O.W.ended || O.W.next + WATCH_BEHIND / 2 < O.W.have)) {
+    if (O.W.next + WatchSamples() <= O.W.have &&
+        (O.W.ended || O.W.next + WATCH_BEHIND / 2 * WatchSamples() < O.W.have)) {
         RunWatchedField(0);
         return 1;
     }

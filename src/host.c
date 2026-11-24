@@ -161,17 +161,28 @@ static unsigned ScriptedButtons(int port)
 
 /* This machine's first player (input.c) and the script's player one; online, where this machine plays one
  * fighter, either player's controls work it. */
-static unsigned LocalButtons(void)
+unsigned HostLocalButtons(void)
 {
+    unsigned buttons;
     if (OverlayIsOpen()) {
         return ScriptedButtons(0);
     }
-    return InputButtons(0) | (NetplayActive() ? InputButtons(1) : 0) | ScriptedButtons(0);
+    buttons = InputButtons(0) | (NetplayActive() ? InputButtons(1) : 0) | ScriptedButtons(0);
+    if (SDL_getenv("DOJO_PRESS_TICKS")) {
+        /* For testing: a controller that changes from one sample to the next (left and right taps, square,
+         * triangle, circle), as a person's can between two ticks, on a pattern the seed varies. */
+        static unsigned n;
+        static const unsigned pattern[8] = {1u << 15, 0, 1u << 13, 1u << 7, 0, 1u << 4, 1u << 15 | 1u << 5, 0};
+        unsigned seed = (unsigned)atoi(SDL_getenv("DOJO_PRESS_TICKS"));
+        n++;
+        buttons |= pattern[((n * 2654435761u + seed * 40503u) >> 7) % 8];
+    }
+    return buttons;
 }
 
 void HostFillPads(void)
 {
-    HostWritePadPort(0, 1, LocalButtons(), NULL);
+    HostWritePadPort(0, 1, HostLocalButtons(), NULL);
     /* The second controller is always plugged in, as on a console with two pads: VS mode needs it. */
     HostWritePadPort(1, 1, (OverlayIsOpen() ? 0 : InputButtons(1)) | ScriptedButtons(1), NULL);
 }
@@ -764,7 +775,7 @@ int main(int argc, char **argv)
         HostFatal("SDL_Init: %s", SDL_GetError());
     }
     /* dojo.ini (a scripted run keeps the defaults), then the environment for this session. */
-    SettingsLoad(SDL_getenv("DOJO_EXIT_FIELD") != NULL);
+    SettingsLoad(SDL_getenv("DOJO_EXIT_FIELD") != NULL || SDL_getenv("DOJO_HIDDEN") != NULL);
     {
         const char *fps = SDL_getenv("DOJO_FPS");
         const char *scale = SDL_getenv("DOJO_SCALE");
@@ -780,6 +791,11 @@ int main(int argc, char **argv)
         }
     }
     SetAspect();
+    if (SDL_getenv("DOJO_HIDDEN")) {
+        /* For tests run while someone uses the machine: no window on the screen, drawn on the CPU (the
+         * simulation is the same with either renderer). */
+        g_settings.software = 1;
+    }
     {
         /* Vulkan draws at the scale setting (default 4) times the console's resolution; the software
          * setting, or no Vulkan, draws at 1x on the CPU. */
@@ -794,7 +810,8 @@ int main(int argc, char **argv)
         }
     }
     if (!sVulkan) {
-        sWindow = SDL_CreateWindow("Dojo", 1280, 960, SDL_WINDOW_RESIZABLE);
+        sWindow = SDL_CreateWindow("Dojo", 1280, 960,
+                                   SDL_WINDOW_RESIZABLE | (SDL_getenv("DOJO_HIDDEN") ? SDL_WINDOW_HIDDEN : 0));
         if (!sWindow) {
             HostFatal("SDL_CreateWindow: %s", SDL_GetError());
         }
@@ -957,7 +974,7 @@ int main(int argc, char **argv)
         }
         if (NetplayActive()) {
             /* Online, the session runs the field: both controllers, rollbacks, waiting for the other. */
-            newField = NetplayRunField(LocalButtons());
+            newField = NetplayRunField(HostLocalButtons());
             if (newField && KernelFieldCount() % 30 == 0) {
                 SDL_SetWindowTitle(sWindow, NetplayStatus());
             }
@@ -966,14 +983,12 @@ int main(int argc, char **argv)
             newField = OnlineWatchField();
         } else {
             /* The game runs to its next yield: a vertical blank, or the end of a tick. The controllers are
-             * written at vertical blanks, as the console's BIOS does, and the field's sound taken after
-             * one: host work, done here on the host's stack rather than the game's. */
-            static int resumeAtBlank = 1;
-            if (resumeAtBlank) {
-                HostFillPads();
-            }
+             * written before each tick, not only at vertical blanks as the console's BIOS does, so at a high
+             * rate a press counts from the next tick; the field's sound is taken after a blank: host work,
+             * done here on the host's stack rather than the game's. */
+            HostFillPads();
             ContextSwitchToGame();
-            newField = resumeAtBlank = KernelLastYieldWasBlank();
+            newField = KernelLastYieldWasBlank();
             if (newField) {
                 int frames;
                 const int16_t *samples = SpuTakeFieldAudio(&frames);

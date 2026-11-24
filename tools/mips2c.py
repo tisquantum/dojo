@@ -748,6 +748,7 @@ class Translator:
         out.append("static u32 R[32];")
         out.append("static u32 HI, LO;")
         out.append("static u32 sStack[0x10000];")
+        out.append("void SaveStateAddDeadStack(void *base, unsigned size, const unsigned *sp);")
         out.append("")
         out.append("/* A corner's packed position for the drawers' off-screen test, its x read as left of the screen only")
         out.append(" * past the widescreen margin (Translator.mark_reject_chains). */")
@@ -875,6 +876,8 @@ class Translator:
         out.append("__attribute__((constructor)) static void InitAsmData(void)")
         out.append("{")
         out.extend(data_inits)
+        out.append("    /* the emulated stack below its pointer is dead: a save state clears it (savestate.c) */")
+        out.append("    SaveStateAddDeadStack(sStack, sizeof(sStack), &R[29]);")
         out.append("}")
         return "\n".join(out) + "\n"
 
