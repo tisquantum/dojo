@@ -1042,6 +1042,9 @@ int main(int argc, char **argv)
         }
         PaceToEmulatedTime();
     }
+    if (OverlayIsOpen()) {
+        SettingsSave(); /* the window closed with the menu up: what was changed in it (shutting it saves too) */
+    }
     OnlineDisconnect();
     InputShutdown();
     if (sVulkan) {

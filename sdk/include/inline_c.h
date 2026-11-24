@@ -98,9 +98,9 @@
 #define gte_stsxy2(r0) GTE_SWC2(14, (r0))
 #define gte_stsxy3(r0, r1, r2) (GTE_SWC2(12, (r0)), GTE_SWC2(13, (r1)), GTE_SWC2(14, (r2)))
 #define gte_stsz(r0)   GTE_SWC2(19, (r0))
-#define gte_stsz3(r0, r1, r2)                                                                                 \
-    (*(short *)(r0) = (short)GTE_MFC2(17), *(short *)(r1) = (short)GTE_MFC2(18),                              \
-     *(short *)(r2) = (short)GTE_MFC2(19))
+/* Three swc2 on the console: whole words, the depths zero-extended. (A 16-bit store left the upper half of
+ * weather.c's long slots as it was, and its snow sized flakes from that and drew long streaks.) */
+#define gte_stsz3(r0, r1, r2) (GTE_SWC2(17, (r0)), GTE_SWC2(18, (r1)), GTE_SWC2(19, (r2)))
 #define gte_stotz(r0)    (*(long *)(r0) = (long)GTE_MFC2(7))
 #define gte_stopz(r0)    (*(long *)(r0) = (long)GTE_MFC2(24))
 #define gte_stszotz(r0)  (*(long *)(r0) = (long)GTE_MFC2(19) >> 2)

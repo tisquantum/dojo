@@ -36,7 +36,7 @@ DECOMP_DIR = os.path.join(PORT_DIR, "decomp")
 
 # The decompilation, with Dojo's changes, this version is built from: a branch of a fork of the decompilation,
 # fetched at this exact commit.
-DECOMP_COMMIT = "c95a621e9ed7c31bcd0420cda6735762016c2751"
+DECOMP_COMMIT = "ecfa7280a891a5702bd2a0530967afb1517e9884"
 DECOMP_URL = "https://github.com/tisquantum/bushido/archive/%s.zip" % DECOMP_COMMIT
 DECOMP_STAMP = ".dojo-decomp"
 BUILD_DIR = os.path.join(PORT_DIR, "build")
@@ -286,6 +286,15 @@ def load_ini():
     except OSError:
         pass
     return values
+
+
+def ini_stamp():
+    """When dojo.ini last changed, to notice the game changing it."""
+    try:
+        st = os.stat(INI)
+        return st.st_mtime_ns, st.st_size
+    except OSError:
+        return None
 
 
 def save_ini(values):
@@ -704,6 +713,9 @@ class Launcher:
         self.build_settings_tab()
         self.build_build_tab()
         self.build_controls_tab()
+        self.shown_settings = self.settings()   # dojo.ini as the tabs show it
+        self.ini_stamp = ini_stamp()
+        root.bind("<FocusIn>", lambda e: self.reload_settings() if e.widget is root else None, add="+")
 
         bar = ttk.Frame(root, style="Ink.TFrame", padding=(20, 6, 20, 14))
         bar.pack(fill="x")
@@ -1077,12 +1089,33 @@ class Launcher:
         return {key: getter() for key, (getter, _) in self.vars.items()}
 
     def save_settings(self):
+        """Writes what was changed here since the launcher last read dojo.ini, and nothing else: the game changes
+        the file too (F1), so the launcher's copy of the other settings may be older than the file's."""
         try:
+            current = self.settings()
+            changed = {k: v for k, v in current.items() if v != self.shown_settings.get(k)}
+            if not changed:
+                return
             values = load_ini()
-            values.update(self.settings())
+            values.update(changed)
             save_ini(values)
+            self.shown_settings = current
+            self.ini_stamp = ini_stamp()
         except (OSError, ValueError):
             pass
+
+    def reload_settings(self):
+        """Shows dojo.ini as it is now, if something else (the game) changed it since the launcher last looked."""
+        if ini_stamp() == self.ini_stamp or getattr(self, "capturing", None) is not None:
+            return
+        values = load_ini()
+        for key, (_, setter) in self.vars.items():
+            setter(values[key])
+        self.shown_settings = self.settings()
+        self.ini_stamp = ini_stamp()
+        self.controls = load_controls()
+        self.refresh_pads()
+        self.refresh_cells()
 
     def reset_settings(self):
         if not messagebox.askyesno("Dojo", "Put every setting back to its default?"):
@@ -1090,6 +1123,8 @@ class Launcher:
         for key, (_, setter) in self.vars.items():
             setter(DEFAULTS[key])
         save_ini(DEFAULTS)
+        self.shown_settings = self.settings()
+        self.ini_stamp = ini_stamp()
 
     # -- Build tab --
 
@@ -1850,6 +1885,7 @@ class Launcher:
                             style="Warn.TLabel")
                     self.update_buttons()
                 elif kind == "game-exit":
+                    self.reload_settings()   # what was changed in the game's menu
                     self.status.configure(text="The game closed." if value == 0 else
                                           "The game stopped with an error (code %d)." % value)
                     if value != 0:
