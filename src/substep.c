@@ -12,10 +12,22 @@ int g_pcTicksPerFrame = 1;
 int g_pcFrameTicks = 1;
 int g_pcSubtick;
 
-/* The states whose code is written for ticks (see pc_substep.h): combat. */
+/* The states whose code is written for ticks (see pc_substep.h): combat and the scenes the fighters play
+ * in (the attract mode's bout, the replay, the victory and continue screens, the Slash-clear and approach
+ * cutscenes). */
 int PcStateSubsteps(int gameState)
 {
-    return gameState == 2; /* GAME_STATE_UPDATE_COMBAT */
+    switch (gameState) {
+    case 2:  /* GAME_STATE_UPDATE_COMBAT */
+    case 6:  /* GAME_STATE_UPDATE_DEMO_BATTLE */
+    case 14: /* GAME_STATE_UPDATE_SLASH_CLEAR_CUTSCENE */
+    case 18: /* GAME_STATE_UPDATE_BATTLE_REPLAY */
+    case 20: /* GAME_STATE_UPDATE_VICTORY_SCENE */
+    case 28: /* GAME_STATE_UPDATE_CONTINUE_SCREEN */
+    case 48: /* GAME_STATE_UPDATE_APPROACH_CUTSCENE */
+        return 1;
+    }
+    return 0;
 }
 
 /* The n-th root of r/4096, in Q12: the largest y with (y/4096)^n <= r/4096, found by bisection in 64-bit

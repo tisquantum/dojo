@@ -20,6 +20,10 @@ extern int g_pcSubtick;
 #define PC_TICKS_PER_FRAME g_pcFrameTicks
 /* A per-frame counter's ++x: the next value on every tick, stored by the last. */
 #define PC_FRAME_INC(x) (PC_LAST_SUBTICK ? ++(x) : (x) + 1)
+/* A frame count as ticks, for what moves with it (a scene's camera sweep): `frames` is the count on the
+ * frame's last tick, where this is frames * g_pcFrameTicks; the ticks before step up to it from the last
+ * frame's. With one tick a frame it is `frames`. */
+#define PC_TICKS(frames) ((frames) * g_pcFrameTicks - (g_pcFrameTicks - 1 - g_pcSubtick))
 /* A per-frame amount that comes all at once at the end of the frame (a velocity's gravity): 0 before. */
 #define PC_ON_LAST(perFrame) (PC_LAST_SUBTICK ? (perFrame) : 0)
 
