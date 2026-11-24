@@ -740,6 +740,21 @@ int main(int argc, char **argv)
     }
     MdecCheckTables();
     setvbuf(stdout, NULL, _IONBF, 0); /* the game's own printf output, kept up to a crash */
+    if (argc > 1 && strncmp(argv[1], "--", 2) == 0) {
+        /* The launcher's helpers for its Controls tab (input.c): no window, no game. */
+        int code;
+        setvbuf(stdout, NULL, _IONBF, 0);
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+        if (!SDL_Init(SDL_INIT_GAMEPAD | SDL_INIT_AUDIO)) {
+            return 1;
+        }
+        SettingsLoad(0);
+        InputInit();
+        code = InputTool(argv[1], argc > 2 ? argv[2] : NULL);
+        InputShutdown();
+        SDL_Quit();
+        return code < 0 ? 2 : code;
+    }
     if (argc > 1) {
         sDiscPath = argv[1];
     } else {

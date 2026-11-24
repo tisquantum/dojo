@@ -26,7 +26,7 @@ import zipfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-DOJO_VERSION = "0.1.2"
+DOJO_VERSION = "0.1.3"
 
 # The folder of Dojo.exe in a release, of this file in a checkout.
 PORT_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
@@ -261,7 +261,8 @@ def default_name():
 DEFAULTS = {
     "aspect": "auto", "name": default_name(), "server": "dojo-matchmaker.fly.dev:7777",
     "fps": 0, "scale": 4, "software": 0, "fullscreen": 0, "vsync": 0, "volume": 100, "show_fps": 0,
-    "analog_stick": 0, "p2p_port": 7778, "watch_hill": 1, "offline": 0,
+    "analog_stick": 0, "p2p_port": 7778, "watch_hill": 1, "offline": 0, "stick_deadzone": 50, "rumble": 100,
+    "dualsense_haptics": 1, "keyboard_player": 1,
 }
 
 
@@ -301,6 +302,145 @@ def save_ini(values):
         pass
     with open(INI, "w", encoding="utf-8") as f:
         f.writelines(lines)
+
+
+# -- the controls (port/src/input.c) ---------------------------------------------------------------------------
+
+# A binding: what one slot of a console button is worked by (input.h), 0 for nothing.
+KEY, MOUSE, PAD, AXIS = 0x10000, 0x20000, 0x30000, 0x40000
+
+# The console's buttons, in the game's order, with their dojo.ini keys.
+BUTTONS = [("Cross", "cross"), ("Circle", "circle"), ("Square", "square"), ("Triangle", "triangle"),
+           ("L1", "l1"), ("R1", "r1"), ("L2", "l2"), ("R2", "r2"), ("Start", "start"), ("Select", "select"),
+           ("D-pad up", "up"), ("D-pad down", "down"), ("D-pad left", "left"), ("D-pad right", "right")]
+
+# SDL's scancodes, their names (SDL_GetScancodeName) and the Windows virtual keys Tk reports for them.
+SCANCODES = {}   # scancode: name
+VK_SCANCODES = {}  # virtual key: scancode
+for _i in range(26):
+    SCANCODES[4 + _i] = chr(65 + _i)
+    VK_SCANCODES[65 + _i] = 4 + _i
+for _i in range(10):
+    SCANCODES[30 + (_i + 9) % 10] = str(_i)
+    VK_SCANCODES[48 + _i] = 30 + (_i + 9) % 10
+    SCANCODES[89 + (_i + 9) % 10] = "Keypad %d" % _i
+    VK_SCANCODES[96 + _i] = 89 + (_i + 9) % 10
+for _i in range(12):
+    SCANCODES[58 + _i] = "F%d" % (_i + 1)
+    VK_SCANCODES[112 + _i] = 58 + _i
+for _vk, _code, _name in [
+        (8, 42, "Backspace"), (9, 43, "Tab"), (13, 40, "Return"), (19, 72, "Pause"), (20, 57, "CapsLock"),
+        (27, 41, "Escape"), (32, 44, "Space"), (33, 75, "PageUp"), (34, 78, "PageDown"), (35, 77, "End"),
+        (36, 74, "Home"), (37, 80, "Left"), (38, 82, "Up"), (39, 79, "Right"), (40, 81, "Down"), (45, 73, "Insert"),
+        (46, 76, "Delete"), (106, 85, "Keypad *"), (107, 87, "Keypad +"), (109, 86, "Keypad -"),
+        (110, 99, "Keypad ."), (111, 84, "Keypad /"), (144, 83, "Numlock"), (145, 71, "ScrollLock"),
+        (186, 51, ";"), (187, 46, "="), (188, 54, ","), (189, 45, "-"), (190, 55, "."), (191, 56, "/"),
+        (192, 53, "`"), (219, 47, "["), (220, 49, "\\"), (221, 48, "]"), (222, 52, "'"), (91, 227, "Left GUI"),
+        (92, 231, "Right GUI")]:
+    SCANCODES[_code] = _name
+    VK_SCANCODES[_vk] = _code
+SCANCODES.update({88: "Keypad Enter", 224: "Left Ctrl", 225: "Left Shift", 226: "Left Alt", 228: "Right Ctrl",
+                  229: "Right Shift", 230: "Right Alt"})
+# Tk's mouse buttons to SDL's (left, middle, right, then the two side buttons).
+MOUSE_BUTTONS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
+
+DEFAULT_BINDS = [[PAD | 0, 0, KEY | 27, 0], [PAD | 1, 0, KEY | 6, 0], [PAD | 2, 0, KEY | 29, 0],
+                 [PAD | 3, 0, KEY | 22, 0], [PAD | 9, 0, KEY | 20, 0], [PAD | 10, 0, KEY | 8, 0],
+                 [AXIS | 8, 0, KEY | 30, 0], [AXIS | 10, 0, KEY | 32, 0], [PAD | 6, 0, KEY | 40, 0],
+                 [PAD | 4, 0, KEY | 42, 0], [PAD | 11, 0, KEY | 82, 0], [PAD | 12, 0, KEY | 81, 0],
+                 [PAD | 13, 0, KEY | 80, 0], [PAD | 14, 0, KEY | 79, 0]]
+
+
+def scancode_for(event):
+    """The SDL scancode of a Tk key press, telling left and right modifiers apart."""
+    side = {"Shift_L": 225, "Shift_R": 229, "Control_L": 224, "Control_R": 228, "Alt_L": 226, "Alt_R": 230}
+    if event.keysym in side:
+        return side[event.keysym]
+    if event.keysym == "KP_Enter":
+        return 88
+    return VK_SCANCODES.get(event.keycode, 0)
+
+
+def binding_name(binding, pad_type):
+    """A binding's name as the game shows it, a gamepad's in the words of its kind (SDL's type names)."""
+    kind, code = binding & 0xF0000, binding & 0xFFFF
+    ps, nintendo = pad_type in ("ps3", "ps4", "ps5"), pad_type.startswith(("switch", "joycon"))
+    if kind == KEY:
+        return SCANCODES.get(code, "Key %d" % code)
+    if kind == MOUSE:
+        return {1: "Left click", 2: "Middle click", 3: "Right click"}.get(code, "Mouse %d" % code)
+    if kind == PAD:
+        faces = (["Cross", "Circle", "Square", "Triangle"] if ps else ["B", "A", "Y", "X"] if nintendo
+                 else ["A", "B", "X", "Y"])
+        names = faces + [
+            {"ps5": "Create", "ps4": "Share", "ps3": "Select", "xboxone": "View"}.get(pad_type,
+                                                                                    "Minus" if nintendo else "Back"),
+            "PS" if ps else "Home" if nintendo else "Guide",
+            "Options" if ps and pad_type != "ps3" else "Plus" if nintendo else "Menu" if pad_type == "xboxone"
+            else "Start",
+            "L3" if ps else "LS press", "R3" if ps else "RS press",
+            "L1" if ps else "L" if nintendo else "LB", "R1" if ps else "R" if nintendo else "RB",
+            "D-pad up", "D-pad down", "D-pad left", "D-pad right",
+            "Mic" if pad_type == "ps5" else "Capture" if nintendo else "Share",
+            "Paddle P1", "Paddle P3", "Paddle P2", "Paddle P4", "Touchpad"]
+        return names[code] if code < len(names) else "Button %d" % code
+    if kind == AXIS:
+        axis, negative = code >> 1, code & 1
+        if axis >= 4:
+            right = axis == 5
+            return ("R2" if right else "L2") if ps else ("ZR" if right else "ZL") if nintendo else \
+                ("RT" if right else "LT")
+        way = ("up" if negative else "down") if axis in (1, 3) else ("left" if negative else "right")
+        return "%s %s" % ("LS" if axis < 2 else "RS", way)
+    return "None"
+
+
+def load_controls():
+    """Each player's gamepad and the bindings, from dojo.ini (the game's defaults where it has none)."""
+    controls = {"pad1": "auto", "pad2": "auto", "pad1_name": "", "pad2_name": "",
+                "binds": [list(b) for b in DEFAULT_BINDS]}
+    keys = {"bind_" + key: i for i, (_, key) in enumerate(BUTTONS)}
+    try:
+        with open(INI, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if "=" not in line or line.lstrip().startswith(";"):
+                    continue
+                key, value = (part.strip() for part in line.split("=", 1))
+                if key in ("pad1", "pad2", "pad1_name", "pad2_name") and value:
+                    controls[key] = value
+                elif key in keys:
+                    try:
+                        binds = [int(v, 16) for v in value.split()]
+                    except ValueError:
+                        continue
+                    if len(binds) == 4:
+                        controls["binds"][keys[key]] = binds
+    except OSError:
+        pass
+    return controls
+
+
+def save_controls(controls):
+    """Writes the gamepads and bindings into dojo.ini, the rest of it as it was."""
+    lines = {"pad1": controls["pad1"], "pad2": controls["pad2"], "pad1_name": controls["pad1_name"],
+             "pad2_name": controls["pad2_name"]}
+    for i, (_, key) in enumerate(BUTTONS):
+        lines["bind_" + key] = " ".join("%x" % b for b in controls["binds"][i])
+    out = []
+    try:
+        with open(INI, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                key = line.split("=", 1)[0].strip() if "=" in line else None
+                if key in lines:
+                    out.append("%s = %s\n" % (key, lines.pop(key)))
+                else:
+                    out.append(line if line.endswith("\n") else line + "\n")
+    except OSError:
+        out.append("; Dojo: the options menu (F1) writes this file.\n")
+    out += ["%s = %s\n" % (key, value) for key, value in lines.items()]
+    os.makedirs(BUILD_DIR, exist_ok=True)
+    with open(INI, "w", encoding="utf-8") as f:
+        f.writelines(out)
 
 
 # -- the disc -------------------------------------------------------------------------------------------------
@@ -749,7 +889,8 @@ class Launcher:
         tab.bind_all("<ButtonRelease-1>", lambda _: self.save_settings(), add="+")
         self.vars["volume"] = (lambda v=volume: int(round(float(v.get()))),
                                lambda x, v=volume: (v.set(x), volume_label.configure(text="%d%%" % x)))
-        check(2, 2, "Left stick works the d-pad", "analog_stick")
+        ttk.Label(tab, text="The stick, rumble, gamepads and key bindings: the Controls tab.",
+                  style="Sub.TLabel").grid(row=2, column=2, columnspan=2, sticky="w", pady=3)
 
         section(4, 2, "Online")
         entry(5, 2, "Your name", "name", kind="name")
@@ -1007,29 +1148,299 @@ class Launcher:
         threading.Thread(target=work, daemon=True).start()
 
     # -- Controls tab --
+    # The same settings as the game's controls page (F1, Controls; port/src/input.c): each player's gamepad, the
+    # keyboard's player, the stick, rumble, and two gamepad and two keyboard-and-mouse bindings for each button.
+    # The gamepads are the game's to see: dojo.exe --pads lists them, --capture-pad waits for a press on one and
+    # --test-rumble shakes a player's.
 
     def build_controls_tab(self):
-        tab = ttk.Frame(self.tabs, padding=16)
-        self.tabs.add(tab, text="  Controls  ")
-        rows = [
-            ("PlayStation", "Keyboard", "Gamepad"),
-            ("D-pad", "Arrow keys", "D-pad (or left stick, if switched on)"),
-            ("Triangle", "S", "Y / Triangle"),
-            ("Circle", "C", "B / Circle"),
-            ("Cross", "X", "A / Cross"),
-            ("Square", "Z", "X / Square"),
-            ("L1 / R1", "Q / E", "Shoulder buttons"),
-            ("L2 / R2", "1 / 3", "Triggers"),
-            ("Start", "Enter", "Start"),
-            ("Select", "Backspace", "Back / View"),
-            ("", "", ""),
-            ("Options menu", "F1 or Esc", "Guide button"),
-            ("Back out", "Hold Backspace 2 s", "Hold Back 2 s"),
-            ("Full screen", "F11", ""),
-        ]
-        for r, row in enumerate(rows):
-            for c, text in enumerate(row):
-                ttk.Label(tab, text=text, style="Section.TLabel" if r == 0 else "TLabel").grid(row=r, column=c, sticky="w", padx=(0, 32), pady=2)
+        outer = ttk.Frame(self.tabs, padding=(16, 12, 4, 12))
+        self.tabs.add(outer, text="  Controls  ")
+        canvas = tk.Canvas(outer, background=PANEL, highlightthickness=0)
+        scroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        tab = ttk.Frame(canvas)
+        canvas.create_window(0, 0, window=tab, anchor="nw")
+        tab.bind("<Configure>", lambda _: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Enter>", lambda _: canvas.bind_all(
+            "<MouseWheel>", lambda e: canvas.yview_scroll(-e.delta // 120, "units")))
+        canvas.bind("<Leave>", lambda _: canvas.unbind_all("<MouseWheel>"))
+
+        values = load_ini()
+        self.controls = load_controls()
+        self.pads = []                # (guid, type, wired, name) from dojo.exe --pads
+        self.capturing = None         # (button, slot) waiting for its input
+        self.cells = {}
+
+        # The devices, the stick and rumble.
+        devices = ttk.Frame(tab)
+        devices.grid(row=0, column=0, sticky="w")
+        ttk.Label(devices, text="Devices", style="Section.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
+        self.pad_boxes = []
+        for player in range(2):
+            ttk.Label(devices, text="Player %d gamepad" % (player + 1)).grid(row=1 + player, column=0, sticky="w",
+                                                                           padx=(0, 8), pady=3)
+            var = tk.StringVar()
+            box = ttk.Combobox(devices, textvariable=var, state="readonly", width=40)
+            box.grid(row=1 + player, column=1, sticky="w")
+            box.bind("<<ComboboxSelected>>", lambda _, p=player: self.choose_pad(p))
+            ttk.Button(devices, text="Test rumble", command=lambda p=player: self.test_rumble(p)).grid(
+                row=1 + player, column=2, sticky="w", padx=(8, 0))
+            self.pad_boxes.append((var, box))
+        ttk.Label(devices, text="Keyboard & mouse").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
+        self.combo_var(devices, 3, "keyboard_player", ["Player 1", "Player 2"], [1, 2], values)
+        self.pad_note = ttk.Label(devices, text="", style="Sub.TLabel")
+        self.pad_note.grid(row=4, column=1, columnspan=2, sticky="w")
+        ttk.Button(devices, text="Find gamepads", command=self.find_pads).grid(row=4, column=0, sticky="w",
+                                                                               pady=(2, 0))
+
+        feel = ttk.Frame(tab)
+        feel.grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(feel, text="Stick and rumble", style="Section.TLabel").grid(row=0, column=0, columnspan=4,
+                                                                               sticky="w")
+        var = tk.BooleanVar(value=bool(values["analog_stick"]))
+        ttk.Checkbutton(feel, text="Left stick works the d-pad", variable=var, command=self.save_settings).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=3)
+        self.vars["analog_stick"] = (lambda v=var: int(v.get()), lambda x, v=var: v.set(bool(x)))
+        ttk.Label(feel, text="Stick dead zone").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        self.combo_var(feel, 2, "stick_deadzone", ["%d%%" % v for v in range(10, 100, 10)], list(range(10, 100, 10)),
+                       values)
+        ttk.Label(feel, text="Rumble").grid(row=1, column=2, sticky="w", padx=(32, 8), pady=3)
+        self.combo_var(feel, 1, "rumble", ["Off"] + ["%d%%" % v for v in range(10, 110, 10)],
+                       list(range(0, 110, 10)), values, column=3)
+        var = tk.BooleanVar(value=bool(values["dualsense_haptics"]))
+        ttk.Checkbutton(feel, text="DualSense haptics (on a USB cable)", variable=var,
+                        command=self.save_settings).grid(row=2, column=2, columnspan=2, sticky="w", padx=(32, 0))
+        self.vars["dualsense_haptics"] = (lambda v=var: int(v.get()), lambda x, v=var: v.set(bool(x)))
+        self.rumble_note = ttk.Label(feel, text="", style="Sub.TLabel")
+        self.rumble_note.grid(row=3, column=0, columnspan=4, sticky="w")
+
+        # The bindings.
+        table = ttk.Frame(tab)
+        table.grid(row=2, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(table, text="Bindings", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(table, text="Gamepad", style="Sub.TLabel").grid(row=0, column=1, columnspan=2)
+        ttk.Label(table, text="Keyboard & mouse", style="Sub.TLabel").grid(row=0, column=3, columnspan=2)
+        for c, text in enumerate(["Button", "Input 1", "Input 2", "Input 1", "Input 2"]):
+            ttk.Label(table, text=text, style="Sub.TLabel").grid(row=1, column=c, sticky="w" if c == 0 else "")
+        for b, (name, key) in enumerate(BUTTONS):
+            ttk.Label(table, text=name).grid(row=2 + b, column=0, sticky="w", padx=(0, 16))
+            for slot in range(4):
+                cell = tk.Label(table, width=14, background=FIELD, foreground=PAPER, font=("Segoe UI", 10),
+                                padx=4, pady=3, cursor="hand2")
+                cell.grid(row=2 + b, column=1 + slot, padx=2, pady=2)
+                cell.bind("<Button-1>", lambda e, b=b, s=slot: self.cell_clicked(e, b, s))
+                cell.bind("<Button-3>", lambda _, b=b, s=slot: self.clear_cell(b, s))
+                cell.bind("<Enter>", lambda _, c=cell: c.configure(background=FIELD_HOVER)
+                          if c.cget("background") == FIELD else None)
+                cell.bind("<Leave>", lambda _, c=cell: c.configure(background=FIELD)
+                          if c.cget("background") == FIELD_HOVER else None)
+                self.cells[(b, slot)] = cell
+            ttk.Button(table, text="Reset", width=6, command=lambda b=b: self.reset_bindings(b)).grid(
+                row=2 + b, column=5, padx=(6, 0))
+        foot = ttk.Frame(tab)
+        foot.grid(row=3, column=0, sticky="w", pady=(10, 0))
+        ttk.Button(foot, text="Reset all bindings", command=lambda: self.reset_bindings(None)).pack(side="left")
+        ttk.Label(foot, text="Click a cell, then press the key, mouse button or gamepad button for it. Right-click "
+                  "clears it.", style="Sub.TLabel", wraplength=480).pack(side="left", padx=(12, 0))
+        ttk.Label(tab, text="Also in the game: F1, Controls. In the game, F1 or Esc opens the menu; holding Backspace "
+                  "(or the gamepad's back button) for 2 seconds goes back; F11 switches full screen.",
+                  style="Sub.TLabel", wraplength=640).grid(row=4, column=0, sticky="w", pady=(12, 0))
+
+        tab.bind_all("<KeyPress>", self.key_pressed, add="+")
+        self.refresh_pads()
+        self.refresh_cells()
+        self.find_pads()
+
+    def combo_var(self, parent, row, key, names, choices, values, column=1):
+        var = tk.StringVar()
+        current = values[key]
+        var.set(names[choices.index(current)] if current in choices else names[-1])
+        box = ttk.Combobox(parent, textvariable=var, values=names, state="readonly", width=12)
+        box.grid(row=row, column=column, sticky="w")
+        box.bind("<<ComboboxSelected>>", lambda _: self.save_settings())
+        self.vars[key] = (lambda v=var: choices[names.index(v.get())],
+                          lambda x, v=var: v.set(names[choices.index(x)] if x in choices else names[-1]))
+
+    def pad_type(self):
+        """The gamepad the names follow: player one's, or the first connected."""
+        for player in range(2):
+            guid = self.controls["pad%d" % (player + 1)]
+            for pad in self.pads:
+                if pad[0].lower() == guid.lower():
+                    return pad[1]
+        return self.pads[0][1] if self.pads else "xboxone"
+
+    def refresh_cells(self):
+        kind = self.pad_type()
+        for (b, slot), cell in self.cells.items():
+            binding = self.controls["binds"][b][slot]
+            if self.capturing == (b, slot):
+                cell.configure(text="Press a gamepad button..." if slot < 2 else "Press a key or click...",
+                               background=CRIMSON, foreground="#ffffff")
+            else:
+                cell.configure(text=binding_name(binding, kind), background=FIELD,
+                               foreground=PAPER if binding else DIM)
+
+    def refresh_pads(self):
+        choices = ["Auto (the first free gamepad)", "None"] + ["%s%s" % (p[3], "  (USB)" if p[2] else "")
+                                                             for p in self.pads]
+        for player, (var, box) in enumerate(self.pad_boxes):
+            chosen = self.controls["pad%d" % (player + 1)]
+            shown = list(choices)
+            if chosen == "auto":
+                var.set(shown[0])
+            elif chosen == "none":
+                var.set(shown[1])
+            else:
+                index = next((i for i, p in enumerate(self.pads) if p[0].lower() == chosen.lower()), None)
+                if index is None:
+                    shown.append("%s (not connected)" % (self.controls["pad%d_name" % (player + 1)] or "Gamepad"))
+                    var.set(shown[-1])
+                else:
+                    var.set(shown[2 + index])
+            box.configure(values=shown)
+
+    def choose_pad(self, player):
+        var, box = self.pad_boxes[player]
+        index = list(box.cget("values")).index(var.get())
+        key = "pad%d" % (player + 1)
+        if index == 0:
+            self.controls[key], self.controls[key + "_name"] = "auto", ""
+        elif index == 1:
+            self.controls[key], self.controls[key + "_name"] = "none", ""
+        elif index - 2 < len(self.pads):
+            self.controls[key], self.controls[key + "_name"] = self.pads[index - 2][0], self.pads[index - 2][3]
+        save_controls(self.controls)
+        self.refresh_pads()
+        self.refresh_cells()
+
+    def run_helper(self, args, done):
+        """Runs dojo.exe with a helper command in a thread; done(output or None) back on this thread."""
+        if not os.path.isfile(EXE):
+            done(None)
+            return
+
+        def work():
+            try:
+                out = subprocess.run([EXE] + args, cwd=BUILD_DIR, capture_output=True, text=True, timeout=20,
+                                     creationflags=NO_WINDOW).stdout
+            except (OSError, subprocess.SubprocessError):
+                out = None
+            self.events.put(("call", lambda: done(out)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def find_pads(self):
+        def done(out):
+            if out is None:
+                self.pad_note.configure(text="Build the game first: it finds the gamepads." if not os.path.isfile(EXE)
+                                        else "Couldn't ask the game for the gamepads.")
+                return
+            self.pads = []
+            for line in out.splitlines():
+                parts = line.split(" ", 4)
+                if parts[0] == "pad" and len(parts) == 5:
+                    self.pads.append((parts[1], parts[2], parts[3] == "1", parts[4]))
+            self.pad_note.configure(text="%d gamepad%s connected." % (len(self.pads), "" if len(self.pads) == 1
+                                                                      else "s") if self.pads
+                                    else "No gamepads connected.")
+            self.refresh_pads()
+            self.refresh_cells()
+
+        self.pad_note.configure(text="Looking for gamepads...")
+        self.run_helper(["--pads"], done)
+
+    def test_rumble(self, player):
+        if self.game_running():
+            self.rumble_note.configure(text="The game is running: close it to test here.")
+            return
+        self.save_settings()
+
+        def done(out):
+            out = (out or "").strip()
+            self.rumble_note.configure(text={
+                "haptics": "Player %d: that was the DualSense's haptics." % (player + 1),
+                "rumble": "Player %d: that was the gamepad's rumble." % (player + 1),
+                "no gamepad": "Player %d has no gamepad." % (player + 1),
+            }.get(out, "Build the game first." if not os.path.isfile(EXE) else "Couldn't test the rumble."))
+
+        self.rumble_note.configure(text="Rumbling player %d's gamepad..." % (player + 1))
+        self.run_helper(["--test-rumble", str(player + 1)], done)
+
+    def set_binding(self, button, slot, binding):
+        self.capturing = None
+        self.controls["binds"][button][slot] = binding
+        save_controls(self.controls)
+        self.refresh_cells()
+
+    def reset_bindings(self, button):
+        if button is None and not messagebox.askyesno("Dojo", "Put every binding back to its default?"):
+            return
+        for b in range(len(BUTTONS)):
+            if button is None or b == button:
+                self.controls["binds"][b] = list(DEFAULT_BINDS[b])
+        save_controls(self.controls)
+        self.refresh_cells()
+
+    def clear_cell(self, button, slot):
+        if self.capturing is None or self.capturing[1] < 2:
+            self.set_binding(button, slot, 0)   # (while a keyboard cell waits, a right-click is its binding)
+
+    def cell_clicked(self, event, button, slot):
+        if self.capturing is not None and self.capturing[1] >= 2:
+            return   # a keyboard cell is waiting: this click is its binding (mouse_pressed)
+        self.capturing = (button, slot)
+        self.refresh_cells()
+        if slot >= 2:
+            # the next key, or a click anywhere in the window
+            self.root.after(150, lambda: self.root.bind_all("<ButtonPress>", self.mouse_pressed, add="+"))
+            return
+        if self.game_running():
+            self.capturing = None
+            self.refresh_cells()
+            self.rumble_note.configure(text="The game is running: change gamepad bindings in it (F1, Controls).")
+            return
+
+        def done(out):
+            if self.capturing != (button, slot):
+                return
+            line = (out or "").strip()
+            if line.startswith("bind "):
+                self.set_binding(button, slot, int(line[5:], 16))
+            else:
+                self.capturing = None
+                self.refresh_cells()
+                if out is None:
+                    self.rumble_note.configure(text="Build the game first: it reads the gamepad.")
+
+        self.run_helper(["--capture-pad"], done)
+
+    def mouse_pressed(self, event):
+        self.root.unbind_all("<ButtonPress>")
+        if self.capturing is None or self.capturing[1] < 2:
+            return
+        if event.num in MOUSE_BUTTONS:
+            self.set_binding(self.capturing[0], self.capturing[1], MOUSE | MOUSE_BUTTONS[event.num])
+
+    def key_pressed(self, event):
+        if self.capturing is None or self.capturing[1] < 2:
+            return
+        button, slot = self.capturing
+        self.root.unbind_all("<ButtonPress>")
+        if event.keysym == "Escape":
+            self.capturing = None
+            self.refresh_cells()
+            return "break"
+        if event.keysym == "Delete":
+            self.set_binding(button, slot, 0)
+            return "break"
+        code = scancode_for(event)
+        if code:
+            self.set_binding(button, slot, KEY | code)
+        return "break"
 
     # -- updates --
 
@@ -1206,7 +1617,9 @@ class Launcher:
         try:
             while True:
                 kind, value = self.events.get_nowait()
-                if kind == "log":
+                if kind == "call":
+                    value()
+                elif kind == "log":
                     tag = "error" if ("error" in value.lower() and "warning" not in value.lower()) else None
                     self.write_log(value, tag)
                 elif kind == "build-done":

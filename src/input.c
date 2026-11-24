@@ -9,6 +9,7 @@
  * haptics on, the pulse becomes a wave played there instead. */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "input.h"
 #include "settings.h"
@@ -505,4 +506,78 @@ void InputUpdateRumble(int running)
             sRumbleSentAt[p] = now;
         }
     }
+}
+
+/* -- the launcher's helpers ---------------------------------------------------------------------------------- */
+
+static void ToolPump(Uint64 ms)
+{
+    Uint64 until = SDL_GetTicks() + ms;
+    SDL_Event e;
+    while (SDL_GetTicks() < until) {
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_EVENT_GAMEPAD_ADDED || e.type == SDL_EVENT_GAMEPAD_REMOVED) {
+                InputDevicesChanged();
+            }
+        }
+        SDL_Delay(5);
+    }
+}
+
+int InputTool(const char *command, const char *arg)
+{
+    int i;
+    if (strcmp(command, "--pads") == 0) {
+        ToolPump(300); /* the gamepads' arrival */
+        for (i = 0; i < sPadCount; i++) {
+            SDL_Gamepad *pad = sPads[i].pad;
+            printf("pad %s %s %d %s\n", sPads[i].guid, SDL_GetGamepadStringForType(SDL_GetGamepadType(pad)),
+                   SDL_GetGamepadConnectionState(pad) == SDL_JOYSTICK_CONNECTION_WIRED, SDL_GetGamepadName(pad));
+        }
+        for (i = 0; i < 2; i++) {
+            printf("player %d %d\n", i + 1, sPlayerPad[i]);
+        }
+        return 0;
+    }
+    if (strcmp(command, "--capture-pad") == 0) {
+        /* The next gamepad button, trigger or stick pushed, within ten seconds. */
+        Uint64 until = SDL_GetTicks() + 10000, start = SDL_GetTicks();
+        SDL_Event e;
+        while (SDL_GetTicks() < until) {
+            while (SDL_PollEvent(&e)) {
+                int binding;
+                if (e.type == SDL_EVENT_GAMEPAD_ADDED || e.type == SDL_EVENT_GAMEPAD_REMOVED) {
+                    InputDevicesChanged();
+                }
+                if (e.type == SDL_EVENT_GAMEPAD_AXIS_MOTION && SDL_GetTicks() - start < 300) {
+                    continue; /* the axes' first readings */
+                }
+                binding = InputBindingFromEvent(&e, 1);
+                if (binding) {
+                    printf("bind %x\n", binding);
+                    return 0;
+                }
+            }
+            SDL_Delay(5);
+        }
+        printf("none\n");
+        return 0;
+    }
+    if (strcmp(command, "--test-rumble") == 0) {
+        /* Player `arg`'s rumble at full strength for a moment, as a hit would make it. */
+        int player = arg && atoi(arg) == 2;
+        ToolPump(300);
+        for (i = 0; i < 2; i++) {
+            gRumblePulses[i].dutyStep = 0;
+        }
+        for (i = 0; i < 60; i++) {
+            gRumblePulses[player].dutyStep = i < 36 ? (short)(4096 - i * 80) : 0;
+            InputUpdateRumble(1);
+            ToolPump(16);
+        }
+        printf("%s\n", sPlayerPad[player] < 0 ? "no gamepad" : InputHapticsActive() ? "haptics" : "rumble");
+        InputShutdown();
+        return 0;
+    }
+    return -1;
 }

@@ -79,7 +79,7 @@ looks for `game_files/Bushido Blade (USA).bin` in the folder it is started from 
 
 ### Controls
 
-The defaults (every button can be rebound in the in-game menu: **F1**, Controls):
+The defaults (every button can be rebound in the launcher's **Controls** tab, or in the game: **F1**, Controls):
 
 | PlayStation | Keyboard | Gamepad |
 |---|---|---|
@@ -100,6 +100,11 @@ cancels, Delete clears), Delete or Y on a cell clears it, and Reset puts a row b
 own DualShock pulse. A DualSense on a USB cable plays it on its haptic actuators instead (through the
 controller's sound device, which Windows shows as "DualSense Wireless Controller"); over Bluetooth, or with
 DualSense haptics off, it gets SDL's motor rumble.
+
+The launcher's Controls tab has the same settings: click a cell, then press the key, mouse button or gamepad
+button (right-click clears it); *Test rumble* shakes a player's gamepad. It asks the built game for what it
+can't see itself: `dojo.exe --pads` lists the gamepads, `--capture-pad` waits for a press on one and
+`--test-rumble 1|2` rumbles a player's.
 
 ### Settings
 

@@ -47,4 +47,8 @@ int InputHapticsActive(void);
 /* Each field: the game's rumble to the players' gamepads; `running` 0 lets go of every motor. */
 void InputUpdateRumble(int running);
 
+/* The launcher's helpers, run as dojo.exe --pads (the gamepads and each player's), --capture-pad (the next
+ * gamepad binding pressed) or --test-rumble 1|2; returns the exit code, or -1 for an unknown command. */
+int InputTool(const char *command, const char *arg);
+
 #endif
