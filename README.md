@@ -1,9 +1,27 @@
-# Dojo (Bushido Blade for PC)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.svg">
+    <img alt="Dojo" src="docs/logo-light.svg" width="640">
+  </picture>
+</p>
 
-A native Windows port of Bushido Blade (PlayStation, 1997), built from its decompiled source, with things the
-console never had: real frame rates above the game's 30 (60, 120, 144, 165 and beyond: the game's own logic
-runs more often, nothing is interpolated), any screen shape from 4:3 to 32:9, and online play with rollback
-netcode: quick play, private matches and King of the Hill.
+<p align="center">
+  <b>Bushido Blade on PC.</b> A native Windows port of the 1997 PlayStation sword-fighting game.
+</p>
+
+<p align="center">
+  <a href="https://github.com/tisquantum/dojo/releases/latest"><img alt="download Windows" src="https://img.shields.io/badge/download-Windows-0078D6?logo=windows&logoColor=white"></a>
+  <a href="https://github.com/tisquantum/dojo/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/tisquantum/dojo?label=release&color=E5383B"></a>
+  <a href="https://discord.gg/gbU9rDZRh"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
+  <a href="LICENSE"><img alt="license MIT" src="https://img.shields.io/badge/license-MIT-2EA043"></a>
+</p>
+
+---
+
+Dojo is built from the game's decompiled source, with things the console never had: real frame rates above the
+game's 30 (60, 120, 144, 165 and beyond: the game's own logic runs more often, nothing is interpolated), any
+screen shape from 4:3 to 32:9, and online play with rollback netcode: quick play, private matches and King of
+the Hill. Questions, matches and bug reports: join the [Discord](https://discord.gg/gbU9rDZRh).
 
 **No game data is included.** You play with your own copy of the game; the build and the game read it from your
 disc image. Don't share builds of the game: `dojo.exe` contains the game's code.
@@ -263,3 +281,9 @@ under 80 ms lag and 10% loss. Online the rate is agreed like the input delay (th
 
 1. Other states at high rates (replays, the victory and story scenes run at 30 for now).
 2. Rumble.
+
+## License
+
+Dojo's own code is released under the [MIT License](LICENSE). It covers this repository only: not the game,
+which you need your own copy of, nor the decompilation it is built from. The tools bundled in the release keep
+their own licences (`THIRD_PARTY.md` in the release).

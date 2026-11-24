@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 250" width="820" height="250">
+  <defs>
+    <mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="820" height="250">
+      <rect width="820" height="250" fill="#fff"/>
+      <line x1="589.0" y1="242" x2="783.0" y2="62" stroke="#000" stroke-width="22"/>
+    </mask>
+  </defs>
+  <text x="410.0" y="52" text-anchor="middle" fill="#9AA4B2" font-family="Segoe UI, Helvetica, Arial, sans-serif"
+        font-size="22" font-weight="700" letter-spacing="9">BUSHIDO BLADE · PC</text>
+  <g fill="#FFFFFF" mask="url(#cut)">
+    <path transform="translate(59.0 82)" fill-rule="evenodd" d="M0,0 H100 L150,50 V90 L100,140 H0 Z M34,34 V106 H86 L116,76 V64 L86,34 Z"/>
+    <path transform="translate(243.0 82)" fill-rule="evenodd" d="M40,0 H110 L150,40 V100 L110,140 H40 L0,100 V40 Z M52,34 L34,52 V88 L52,106 H98 L116,88 V52 L98,34 Z"/>
+    <path transform="translate(427.0 82)" fill-rule="evenodd" d="M50,0 H150 V100 L110,140 H40 L0,100 V78 H34 V88 L52,106 H98 L116,88 V34 H50 Z"/>
+    <path transform="translate(611.0 82)" fill-rule="evenodd" d="M40,0 H110 L150,40 V100 L110,140 H40 L0,100 V40 Z M52,34 L34,52 V88 L52,106 H98 L116,88 V52 L98,34 Z"/>
+  </g>
+  <line x1="589.0" y1="242" x2="783.0" y2="62" stroke="#E5383B" stroke-width="6" stroke-linecap="round"/>
+</svg>
