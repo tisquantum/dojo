@@ -1,0 +1,22 @@
+# Build output. It holds code translated from the disc (generated/), so it must never be published.
+build/
+__pycache__/
+
+# Anything from the user's own copy of the game, and local runs.
+game_files/
+*.bin
+*.iso
+*.cue
+*.img
+*.mdf
+*.sbi
+*.mcr
+*.mcd
+*.srm
+*.wav
+*.exe
+*.dll
+*.pdb
+*.lib
+dojo.ini
+state_*.bin

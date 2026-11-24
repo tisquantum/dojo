@@ -1,0 +1,900 @@
+/* The options overlay (overlay.h), drawn on the CPU into a transparent picture with SDL's own renderer and
+ * debug font, which each renderer lays over the game.
+ *
+ * Pages: the main page, the options, online play, private matches, a code to type, and a page for waiting
+ * (a queue, a room, an opponent connecting). Holding Back (Backspace, or a gamepad's back button) for two
+ * seconds goes to the previous page, leaves a queue, or, in an online match, leaves the match. */
+
+#include <stdio.h>
+#include <string.h>
+#include "overlay.h"
+#include "settings.h"
+#include "online.h"
+
+#define BACK_HOLD_MS 2000
+#define TOAST_MS     5000
+#define STICK_ON     20000
+#define STICK_OFF    12000
+
+typedef enum Page { PAGE_MAIN, PAGE_OPTIONS, PAGE_ONLINE, PAGE_PRIVATE, PAGE_CODE, PAGE_WAIT, PAGE_COUNT } Page;
+
+enum { MAIN_RESUME, MAIN_ONLINE, MAIN_OPTIONS, MAIN_QUIT, MAIN_COUNT };
+enum {
+    OPT_FPS, OPT_SCALE, OPT_ASPECT, OPT_RENDERER, OPT_DISPLAY, OPT_VSYNC, OPT_VOLUME, OPT_COUNTER, OPT_ANALOG,
+    OPT_BACK, OPT_COUNT
+};
+enum { ONLINE_ROW_QUICK, ONLINE_ROW_PRIVATE, ONLINE_ROW_HILL, ONLINE_ROW_PRIVATE_HILL, ONLINE_ROW_BACK, ONLINE_ROW_COUNT };
+enum { PRIVATE_CREATE, PRIVATE_JOIN, PRIVATE_HOST_DIRECT, PRIVATE_JOIN_DIRECT, PRIVATE_BACK, PRIVATE_COUNT };
+enum { CODE_ENTRY, CODE_GO, CODE_BACK, CODE_COUNT };
+enum { WAIT_LEAVE, WAIT_WATCH, WAIT_COUNT };
+
+static const int sRowCounts[PAGE_COUNT] = {MAIN_COUNT, OPT_COUNT, ONLINE_ROW_COUNT, PRIVATE_COUNT, CODE_COUNT, WAIT_COUNT};
+static const char *const sTitles[PAGE_COUNT] = {"DOJO", "OPTIONS", "PLAY ONLINE", "PRIVATE MATCH",
+                                                "ENTER A CODE", "PLAY ONLINE"};
+static const char *const sMainLabels[MAIN_COUNT] = {"Resume", "Play online", "Options", "Quit game"};
+static const char *const sOptionLabels[OPT_COUNT] = {
+    "Frame rate", "Resolution", "Aspect ratio", "Renderer", "Display", "VSync", "Volume", "Frame counter",
+    "Analog stick", "Back",
+};
+static const char *const sOnlineLabels[ONLINE_ROW_COUNT] = {"Quick play", "Private match", "King of the Hill",
+                                                            "Private hill (by code)", "Back"};
+static const char *const sPrivateLabels[PRIVATE_COUNT] = {"Create a room", "Join a room",
+                                                          "Host directly (no server)", "Join directly by address",
+                                                          "Back"};
+
+static OverlayContext sContext;
+static void (*sApply)(OverlayChange change);
+static int sOpen, sDirty = 1, sShown;
+static Page sPage;
+static int sRow;
+enum { CODE_ROOM, CODE_HILL, CODE_ADDRESS };
+static int sCodeKind;        /* what the code page asks for: a room's code, a hill's, or an address */
+static char sCode[48];
+static int sCodeLetter;      /* the character a gamepad is choosing for the next place */
+#define ADDRESS_CHARS "0123456789.:"
+static SDL_Surface *sCanvas;
+static SDL_Renderer *sDraw;
+static Uint64 sCountStart;
+static int sCount, sFpsShown = -1;
+static Uint64 sBackSince;    /* when Back went down, or 0 */
+static int sBackDone;        /* the hold did its work: nothing more until Back is let go */
+static int sBackShown;       /* the hold's progress in percent, as drawn */
+static char sToast[160];
+static Uint64 sToastUntil;
+static char sBanner[160];
+static OnlineState sLastOnline = ONLINE_OFF;
+static int sStickY, sStickX; /* -1, 0, 1: the stick's direction, for a step only on a new push */
+
+void OverlayInit(const OverlayContext *context, void (*apply)(OverlayChange change))
+{
+    sContext = *context;
+    sApply = apply;
+    sCanvas = SDL_CreateSurface(OVERLAY_WIDTH, OVERLAY_HEIGHT, SDL_PIXELFORMAT_ABGR8888);
+    sDraw = sCanvas ? SDL_CreateSoftwareRenderer(sCanvas) : NULL;
+    sCountStart = SDL_GetTicksNS();
+}
+
+void OverlayUpdateContext(const OverlayContext *context)
+{
+    if (memcmp(context, &sContext, sizeof(sContext)) != 0) {
+        sContext = *context;
+        sDirty = 1;
+    }
+}
+
+int OverlayIsOpen(void)
+{
+    return sOpen;
+}
+
+static void Go(Page page)
+{
+    sPage = page;
+    sRow = 0;
+    sDirty = 1;
+}
+
+static void SetOpen(int open)
+{
+    if (sOpen == open) {
+        return;
+    }
+    sOpen = open;
+    sDirty = 1;
+    if (open) {
+        OnlineState s = OnlineGetState();
+        Go(s == ONLINE_WAITING || s == ONLINE_SETUP ? PAGE_WAIT : PAGE_MAIN);
+    } else {
+        SettingsSave();
+    }
+}
+
+void OverlayOpen(void)
+{
+    SetOpen(1);
+}
+
+static void Toast(const char *text)
+{
+    snprintf(sToast, sizeof(sToast), "%s", text);
+    sToastUntil = SDL_GetTicksNS() + (Uint64)TOAST_MS * 1000000ull;
+    sDirty = 1;
+}
+
+/* The previous page; from the waiting page, leaving the queue or room. */
+static void Back(void)
+{
+    switch (sPage) {
+    case PAGE_MAIN:
+        SetOpen(0);
+        break;
+    case PAGE_OPTIONS:
+        Go(PAGE_MAIN);
+        sRow = MAIN_OPTIONS;
+        break;
+    case PAGE_ONLINE:
+        Go(PAGE_MAIN);
+        sRow = MAIN_ONLINE;
+        break;
+    case PAGE_PRIVATE:
+        Go(PAGE_ONLINE);
+        sRow = ONLINE_ROW_PRIVATE;
+        break;
+    case PAGE_CODE:
+        Go(sCodeKind == CODE_HILL ? PAGE_ONLINE : PAGE_PRIVATE);
+        break;
+    case PAGE_WAIT:
+        OnlineLeave();
+        Go(PAGE_ONLINE);
+        break;
+    default:
+        break;
+    }
+}
+
+static const int sFpsChoices[] = {0, 30, 60, 90, 120, 150, 180, 240, 300, 360, 480};
+#define FPS_CHOICES ((int)(sizeof(sFpsChoices) / sizeof(sFpsChoices[0])))
+
+static int Step(int value, int dir, int lo, int hi)
+{
+    value += dir;
+    return value < lo ? hi : (value > hi ? lo : value);
+}
+
+static void ChangeOption(int dir)
+{
+    Settings *s = &g_settings;
+    int i;
+    switch (sRow) {
+    case OPT_FPS:
+        if (sContext.online) {
+            return;
+        }
+        for (i = 0; i < FPS_CHOICES && sFpsChoices[i] != s->fps; i++) {
+        }
+        s->fps = sFpsChoices[Step(i == FPS_CHOICES ? 0 : i, dir ? dir : 1, 0, FPS_CHOICES - 1)];
+        sApply(OVERLAY_CHANGE_FPS);
+        break;
+    case OPT_SCALE:
+        if (!sContext.vulkan) {
+            return;
+        }
+        s->scale = Step(s->scale, dir ? dir : 1, 1, 8);
+        sApply(OVERLAY_CHANGE_SCALE);
+        break;
+    case OPT_ASPECT:
+        s->aspect = Step(s->aspect, dir ? dir : 1, 0, SETTINGS_ASPECT_COUNT - 1);
+        break;
+    case OPT_RENDERER:
+        s->software = !s->software;
+        break;
+    case OPT_DISPLAY:
+        s->fullscreen = !s->fullscreen;
+        sApply(OVERLAY_CHANGE_FULLSCREEN);
+        break;
+    case OPT_VSYNC:
+        s->vsync = !s->vsync;
+        sApply(OVERLAY_CHANGE_VSYNC);
+        break;
+    case OPT_VOLUME:
+        s->volume += (dir ? dir : 1) * 10;
+        s->volume = s->volume < 0 ? 0 : (s->volume > 100 ? 100 : s->volume);
+        sApply(OVERLAY_CHANGE_VOLUME);
+        break;
+    case OPT_COUNTER:
+        s->showFps = !s->showFps;
+        break;
+    case OPT_ANALOG:
+        s->analog = !s->analog;
+        break;
+    case OPT_BACK:
+        if (dir == 0) {
+            Back();
+        }
+        return;
+    }
+    sDirty = 1;
+}
+
+static int CodeLength(void)
+{
+    return sCodeKind == CODE_ADDRESS ? (int)sizeof(sCode) - 1 : 6;
+}
+
+/* The character a gamepad's up and down are on. */
+static char ChosenChar(void)
+{
+    return sCodeKind == CODE_ADDRESS ? ADDRESS_CHARS[sCodeLetter % (int)strlen(ADDRESS_CHARS)]
+                                     : (char)('A' + sCodeLetter % 26);
+}
+
+static void CodeLetter(char c)
+{
+    size_t n = strlen(sCode);
+    if ((int)n < CodeLength()) {
+        sCode[n] = c;
+        sCode[n + 1] = 0;
+        sDirty = 1;
+    }
+}
+
+static void CodeDelete(void)
+{
+    size_t n = strlen(sCode);
+    if (n > 0) {
+        sCode[n - 1] = 0;
+        sDirty = 1;
+    }
+}
+
+static void CodeSubmit(void)
+{
+    if (sCodeKind == CODE_ADDRESS) {
+        if (!sCode[0]) {
+            Toast("Type the host's address, as 203.0.113.5 or 203.0.113.5:7778.");
+            return;
+        }
+        OnlineJoinDirect(sCode);
+        Go(PAGE_WAIT);
+        return;
+    }
+    if (strlen(sCode) != 6) {
+        Toast("A code has six letters.");
+        return;
+    }
+    if (sCodeKind == CODE_HILL) {
+        OnlineKingOfTheHill(sCode);
+    } else {
+        OnlineJoinRoom(sCode);
+    }
+    Go(PAGE_WAIT);
+}
+
+static void AskCode(int kind)
+{
+    sCodeKind = kind;
+    sCode[0] = 0;
+    sCodeLetter = 0;
+    Go(PAGE_CODE);
+}
+
+/* Left or right (dir -1 or 1) on the current row, or confirm (dir 0). */
+static void Change(int dir)
+{
+    switch (sPage) {
+    case PAGE_MAIN:
+        if (dir != 0) {
+            return;
+        }
+        switch (sRow) {
+        case MAIN_RESUME: SetOpen(0); break;
+        case MAIN_ONLINE: OnlineConnect(); Go(PAGE_ONLINE); break;
+        case MAIN_OPTIONS: Go(PAGE_OPTIONS); break;
+        case MAIN_QUIT: SettingsSave(); sApply(OVERLAY_CHANGE_QUIT); break;
+        }
+        break;
+    case PAGE_OPTIONS:
+        ChangeOption(dir);
+        break;
+    case PAGE_ONLINE:
+        if (dir != 0) {
+            return;
+        }
+        if (sRow == ONLINE_ROW_BACK) {
+            Back();
+            return;
+        }
+        if (sRow == ONLINE_ROW_PRIVATE) {
+            Go(PAGE_PRIVATE); /* player to player needs no server */
+            return;
+        }
+        if (OnlineGetState() == ONLINE_OFF) {
+            OnlineConnect();
+            Toast("Connecting to the server...");
+            return;
+        }
+        if (OnlineGetState() != ONLINE_IDLE) {
+            Toast("Still connecting: a moment.");
+            return;
+        }
+        switch (sRow) {
+        case ONLINE_ROW_QUICK: OnlineQuickPlay(); Go(PAGE_WAIT); break;
+        case ONLINE_ROW_PRIVATE: Go(PAGE_PRIVATE); break;
+        case ONLINE_ROW_HILL: OnlineKingOfTheHill(""); Go(PAGE_WAIT); break;
+        case ONLINE_ROW_PRIVATE_HILL:
+            AskCode(CODE_HILL);
+            break;
+        }
+        break;
+    case PAGE_PRIVATE:
+        if (dir != 0) {
+            return;
+        }
+        if ((sRow == PRIVATE_CREATE || sRow == PRIVATE_JOIN) && OnlineGetState() != ONLINE_IDLE) {
+            OnlineConnect();
+            Toast(OnlineGetState() == ONLINE_OFF ? "That needs the server, which can't be reached."
+                                                 : "Connecting to the server: a moment.");
+            return;
+        }
+        switch (sRow) {
+        case PRIVATE_CREATE: OnlineCreateRoom(); Go(PAGE_WAIT); break;
+        case PRIVATE_JOIN: AskCode(CODE_ROOM); break;
+        case PRIVATE_HOST_DIRECT: OnlineHostDirect(); Go(PAGE_WAIT); break;
+        case PRIVATE_JOIN_DIRECT: AskCode(CODE_ADDRESS); break;
+        case PRIVATE_BACK: Back(); break;
+        }
+        break;
+    case PAGE_CODE:
+        if (sRow == CODE_ENTRY) {
+            if (dir < 0) {
+                CodeDelete();
+            } else if (dir > 0) {
+                CodeLetter(ChosenChar());
+            } else {
+                CodeSubmit();
+            }
+        } else if (dir == 0) {
+            if (sRow == CODE_GO) {
+                CodeSubmit();
+            } else {
+                Back();
+            }
+        }
+        break;
+    case PAGE_WAIT:
+        if (sRow == WAIT_WATCH) {
+            if (g_settings.watch) {
+                OnlineStopWatching();
+            } else {
+                g_settings.watch = 1;
+            }
+            sDirty = 1;
+        } else if (dir == 0) {
+            Back();
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static void Move(int dir)
+{
+    if (sPage == PAGE_CODE && sRow == CODE_ENTRY && dir != 0 && (int)strlen(sCode) < CodeLength()) {
+        /* up and down choose the character a gamepad adds with right; down from the last leaves the row */
+        int last = sCodeKind == CODE_ADDRESS ? (int)strlen(ADDRESS_CHARS) - 1 : 25;
+        if (dir > 0 && sCodeLetter == last) {
+            sRow = CODE_GO;
+        } else {
+            sCodeLetter = Step(sCodeLetter, dir, 0, last);
+        }
+        sDirty = 1;
+        return;
+    }
+    sRow = Step(sRow, dir, 0, sRowCounts[sPage] - 1);
+    sDirty = 1;
+}
+
+static void BackDown(void)
+{
+    if (!sBackSince) {
+        sBackSince = SDL_GetTicksNS();
+        sBackDone = 0;
+    }
+}
+
+static void BackUp(void)
+{
+    sBackSince = 0;
+    sBackDone = 0;
+    if (sBackShown) {
+        sBackShown = 0;
+        sDirty = 1;
+    }
+}
+
+int OverlayHandleEvent(const SDL_Event *e)
+{
+    if (e->type == SDL_EVENT_KEY_DOWN || e->type == SDL_EVENT_KEY_UP) {
+        SDL_Scancode key = e->key.scancode;
+        int down = e->type == SDL_EVENT_KEY_DOWN;
+        /* Back is held to go back; with the menu shut the game still has the key (its select button). */
+        if (key == SDL_SCANCODE_BACKSPACE) {
+            if (down && !e->key.repeat) {
+                BackDown();
+                if (sOpen && sPage == PAGE_CODE && sRow == CODE_ENTRY) {
+                    CodeDelete();
+                }
+            } else if (!down) {
+                BackUp();
+            }
+            return sOpen;
+        }
+        if (!down) {
+            return sOpen;
+        }
+        if (key == SDL_SCANCODE_F1 || key == SDL_SCANCODE_ESCAPE) {
+            if (!e->key.repeat) {
+                SetOpen(!sOpen);
+            }
+            return 1;
+        }
+        if (!sOpen) {
+            return 0;
+        }
+        if (sPage == PAGE_CODE && sRow == CODE_ENTRY) {
+            char c = 0;
+            if (key >= SDL_SCANCODE_A && key <= SDL_SCANCODE_Z) {
+                c = (char)((sCodeKind == CODE_ADDRESS ? 'a' : 'A') + (key - SDL_SCANCODE_A));
+            } else if (sCodeKind == CODE_ADDRESS) {
+                if (key >= SDL_SCANCODE_1 && key <= SDL_SCANCODE_9) {
+                    c = (char)('1' + (key - SDL_SCANCODE_1));
+                } else if (key == SDL_SCANCODE_0) {
+                    c = '0';
+                } else if (key >= SDL_SCANCODE_KP_1 && key <= SDL_SCANCODE_KP_9) {
+                    c = (char)('1' + (key - SDL_SCANCODE_KP_1));
+                } else if (key == SDL_SCANCODE_KP_0) {
+                    c = '0';
+                } else if (key == SDL_SCANCODE_PERIOD || key == SDL_SCANCODE_KP_PERIOD) {
+                    c = '.';
+                } else if (key == SDL_SCANCODE_SEMICOLON) {
+                    c = ':';
+                } else if (key == SDL_SCANCODE_MINUS) {
+                    c = '-';
+                }
+            }
+            if (c) {
+                CodeLetter(c);
+                return 1;
+            }
+        }
+        switch (key) {
+        case SDL_SCANCODE_UP: Move(-1); break;
+        case SDL_SCANCODE_DOWN: Move(1); break;
+        case SDL_SCANCODE_LEFT: Change(-1); break;
+        case SDL_SCANCODE_RIGHT: Change(1); break;
+        case SDL_SCANCODE_RETURN:
+        case SDL_SCANCODE_KP_ENTER:
+        case SDL_SCANCODE_SPACE:
+        case SDL_SCANCODE_X: Change(0); break;
+        case SDL_SCANCODE_C:
+            if (sPage != PAGE_WAIT) {
+                Back();
+            }
+            break;
+        default: break;
+        }
+        return 1;
+    }
+    if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e->type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+        int down = e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+        if (e->gbutton.button == SDL_GAMEPAD_BUTTON_BACK) {
+            if (down) {
+                BackDown();
+            } else {
+                BackUp();
+            }
+            return sOpen;
+        }
+        if (!down) {
+            return sOpen;
+        }
+        if (e->gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE) {
+            SetOpen(!sOpen);
+            return 1;
+        }
+        if (!sOpen) {
+            return 0;
+        }
+        switch (e->gbutton.button) {
+        case SDL_GAMEPAD_BUTTON_DPAD_UP: Move(-1); break;
+        case SDL_GAMEPAD_BUTTON_DPAD_DOWN: Move(1); break;
+        case SDL_GAMEPAD_BUTTON_DPAD_LEFT: Change(-1); break;
+        case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: Change(1); break;
+        case SDL_GAMEPAD_BUTTON_SOUTH: Change(0); break;
+        case SDL_GAMEPAD_BUTTON_EAST:
+            if (sPage != PAGE_WAIT) {
+                Back();
+            }
+            break;
+        case SDL_GAMEPAD_BUTTON_START: SetOpen(0); break;
+        default: break;
+        }
+        return 1;
+    }
+    if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && sOpen) {
+        /* The left stick works the menus too: a push past the middle is one step. */
+        int v = e->gaxis.value;
+        if (e->gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY) {
+            int dir = v < -STICK_ON ? -1 : (v > STICK_ON ? 1 : (v > -STICK_OFF && v < STICK_OFF ? 0 : sStickY));
+            if (dir != sStickY && dir != 0) {
+                Move(dir);
+            }
+            sStickY = dir;
+            return 1;
+        }
+        if (e->gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX) {
+            int dir = v < -STICK_ON ? -1 : (v > STICK_ON ? 1 : (v > -STICK_OFF && v < STICK_OFF ? 0 : sStickX));
+            if (dir != sStickX && dir != 0) {
+                Change(dir);
+            }
+            sStickX = dir;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void OverlayFramePresented(void)
+{
+    Uint64 now = SDL_GetTicksNS();
+    sCount++;
+    if (now - sCountStart >= 1000000000ull) {
+        int fps = (int)((Uint64)sCount * 1000000000ull / (now - sCountStart));
+        sCount = 0;
+        sCountStart = now;
+        if (fps != sFpsShown) {
+            sFpsShown = fps;
+            if (g_settings.showFps) {
+                sDirty = 1;
+            }
+        }
+    }
+}
+
+static void OptionValue(int row, char *out, size_t size)
+{
+    const Settings *s = &g_settings;
+    switch (row) {
+    case OPT_FPS:
+        if (sContext.online) {
+            snprintf(out, size, "%d (set by the online match)", sContext.ticksPerFrame * 30);
+        } else if (s->fps == 0) {
+            snprintf(out, size, "Auto (%d Hz display: %d)", sContext.displayHz, sContext.ticksPerFrame * 30);
+        } else {
+            snprintf(out, size, "%d", s->fps);
+        }
+        break;
+    case OPT_SCALE:
+        if (!sContext.vulkan) {
+            snprintf(out, size, "1x (software renderer)");
+        } else {
+            snprintf(out, size, "%dx (%d lines)", s->scale, s->scale * 240);
+        }
+        break;
+    case OPT_ASPECT:
+        if (s->aspect == SETTINGS_ASPECT_AUTO && sContext.displayW > 0) {
+            snprintf(out, size, "Auto (%dx%d display)%s", sContext.displayW, sContext.displayH,
+                     s->aspect != sContext.runningAspect ? "  (on restart)" : "");
+        } else {
+            snprintf(out, size, "%s%s",
+                     s->aspect == SETTINGS_ASPECT_AUTO ? "Auto (the display's)" : SETTINGS_ASPECTS[s->aspect],
+                     s->aspect != sContext.runningAspect ? "  (on restart)" : "");
+        }
+        break;
+    case OPT_RENDERER:
+        snprintf(out, size, "%s%s", s->software ? "Software" : "Vulkan",
+                 s->software != sContext.runningSoftware ? "  (on restart)" : "");
+        break;
+    case OPT_DISPLAY:
+        snprintf(out, size, "%s", s->fullscreen ? "Full screen" : "Window");
+        break;
+    case OPT_VSYNC:
+        snprintf(out, size, "%s", s->vsync ? "On" : "Off");
+        break;
+    case OPT_VOLUME:
+        snprintf(out, size, "%d%%", s->volume);
+        break;
+    case OPT_COUNTER:
+        snprintf(out, size, "%s", s->showFps ? "On" : "Off");
+        break;
+    case OPT_ANALOG:
+        snprintf(out, size, "%s", s->analog ? "On (the left stick moves)" : "Off");
+        break;
+    default:
+        out[0] = 0;
+        break;
+    }
+}
+
+static void Fill(float x, float y, float w, float h, Uint8 r, Uint8 g, Uint8 b, Uint8 a)
+{
+    SDL_FRect rect = {x, y, w, h};
+    SDL_SetRenderDrawColor(sDraw, r, g, b, a);
+    SDL_RenderFillRect(sDraw, &rect);
+}
+
+static void Text(float x, float y, float scale, const char *text, Uint8 r, Uint8 g, Uint8 b)
+{
+    SDL_SetRenderScale(sDraw, scale, scale);
+    SDL_SetRenderDrawColor(sDraw, r, g, b, 255);
+    SDL_RenderDebugText(sDraw, x / scale, y / scale, text);
+    SDL_SetRenderScale(sDraw, 1, 1);
+}
+
+/* Text wrapped to `width` pixels; returns the lines used. */
+static int Wrapped(float x, float y, float width, const char *text, Uint8 r, Uint8 g, Uint8 b)
+{
+    int perLine = (int)(width / 8), lines = 0;
+    while (*text) {
+        char line[96];
+        int n = (int)strlen(text), cut = n;
+        if (n > perLine) {
+            cut = perLine;
+            while (cut > 0 && text[cut] != ' ') {
+                cut--;
+            }
+            if (cut == 0) {
+                cut = perLine;
+            }
+        }
+        if (cut > (int)sizeof(line) - 1) {
+            cut = (int)sizeof(line) - 1;
+        }
+        memcpy(line, text, (size_t)cut);
+        line[cut] = 0;
+        Text(x, y + (float)lines * 12, 1, line, r, g, b);
+        lines++;
+        text += cut;
+        while (*text == ' ') {
+            text++;
+        }
+    }
+    return lines;
+}
+
+static const char *RowLabel(int row, char *buffer, size_t size)
+{
+    switch (sPage) {
+    case PAGE_MAIN: return sMainLabels[row];
+    case PAGE_OPTIONS: return sOptionLabels[row];
+    case PAGE_ONLINE: return sOnlineLabels[row];
+    case PAGE_PRIVATE: return sPrivateLabels[row];
+    case PAGE_CODE:
+        if (row == CODE_ENTRY) {
+            if (sCodeKind == CODE_ADDRESS) {
+                snprintf(buffer, size, "Address:  %s%c", sCode, (int)strlen(sCode) < CodeLength() ? '_' : ' ');
+            } else {
+                char shown[7];
+                int i, n = (int)strlen(sCode);
+                for (i = 0; i < 6; i++) {
+                    shown[i] = i < n ? sCode[i] : (i == n ? (char)('a' + sCodeLetter) : '_');
+                }
+                shown[6] = 0;
+                snprintf(buffer, size, "Code:  %c %c %c %c %c %c", shown[0], shown[1], shown[2], shown[3], shown[4],
+                         shown[5]);
+            }
+            return buffer;
+        }
+        return row == CODE_GO ? (sCodeKind == CODE_HILL ? "Join the hill" : sCodeKind == CODE_ROOM ? "Join the room"
+                                                                                                 : "Connect")
+                              : "Back";
+    case PAGE_WAIT:
+        if (row == WAIT_WATCH) {
+            snprintf(buffer, size, "Watch the hill's matches: %s", g_settings.watch ? "On" : "Off");
+            return buffer;
+        }
+        return "Leave";
+    default: return "";
+    }
+}
+
+static void DrawMenu(void)
+{
+    const float panelW = 470, panelH = 320, left = (OVERLAY_WIDTH - panelW) / 2, top = (OVERLAY_HEIGHT - panelH) / 2;
+    float y;
+    int row;
+    const char *hint;
+    Fill(0, 0, OVERLAY_WIDTH, OVERLAY_HEIGHT, 0, 0, 0, 110);
+    Fill(left, top, panelW, panelH, 16, 12, 10, 235);
+    Fill(left, top, panelW, 2, 190, 40, 30, 255);
+    Fill(left, top + panelH - 2, panelW, 2, 190, 40, 30, 255);
+    Text(left + 20, top + 14, 2, sTitles[sPage], 235, 220, 190);
+    y = top + 44;
+    if (sPage == PAGE_ONLINE || sPage == PAGE_WAIT || sPage == PAGE_PRIVATE || sPage == PAGE_CODE) {
+        char status[200];
+        OnlineDescribe(status, sizeof(status));
+        y += 12 * (float)Wrapped(left + 22, y, panelW - 44, status, 200, 190, 150);
+        if (sPage == PAGE_ONLINE) {
+            char who[64];
+            snprintf(who, sizeof(who), "Playing as %s", g_settings.name);
+            Text(left + 22, y, 1, who, 140, 130, 115);
+            y += 12;
+        }
+        if (sPage == PAGE_CODE) {
+            y += 12 * (float)Wrapped(left + 22, y, panelW - 44,
+                                     sCodeKind == CODE_HILL ? "The hill's code: six letters. A new code makes a new hill."
+                                     : sCodeKind == CODE_ROOM ? "The code your friend's game shows: six letters."
+                                     : "The host's address (their game shows it), as 192.168.1.20 or 203.0.113.5:7778.",
+                                     140, 130, 115);
+        }
+        y += 8;
+    }
+    for (row = 0; row < sRowCounts[sPage]; row++) {
+        char value[96], label[64];
+        int selected = row == sRow;
+        int locked = sPage == PAGE_OPTIONS &&
+                     ((row == OPT_FPS && sContext.online) || (row == OPT_SCALE && !sContext.vulkan));
+        if (selected) {
+            Fill(left + 10, y - 5, panelW - 20, 18, 120, 30, 22, 255);
+        }
+        Text(left + 22, y, 1, RowLabel(row, label, sizeof(label)), selected ? 255 : 210, selected ? 245 : 200,
+             selected ? 230 : 185);
+        if (sPage == PAGE_OPTIONS) {
+            OptionValue(row, value, sizeof(value));
+            if (value[0]) {
+                char shown[110];
+                snprintf(shown, sizeof(shown), selected && !locked ? "< %s >" : "  %s", value);
+                Text(left + 160, y, 1, shown, locked ? 130 : 240, locked ? 125 : 210, locked ? 120 : 150);
+            }
+        }
+        y += 20;
+    }
+    hint = sPage == PAGE_WAIT   ? "Hold Back (Backspace) for 2 seconds to leave"
+           : sPage == PAGE_CODE ? "Type letters, or up/down and right   Enter: join"
+                                : "Arrows: choose   Enter: select   Hold Back: go back";
+    Text(left + 20, top + panelH - 22, 1, hint, 150, 140, 125);
+}
+
+/* The corner's lines when the menu is shut: the frame counter, a wait or a match, a message. */
+static void DrawHud(void)
+{
+    float y = 4;
+    if (g_settings.showFps && sFpsShown >= 0) {
+        char text[32];
+        snprintf(text, sizeof(text), "%d fps", sFpsShown);
+        Fill(4, y, 8 * (float)strlen(text) + 8, 16, 0, 0, 0, 160);
+        Text(8, y + 4, 1, text, 120, 255, 120);
+        y += 20;
+    }
+    if (sBanner[0]) {
+        Fill(4, y, 8 * (float)strlen(sBanner) + 8, 16, 0, 0, 0, 160);
+        Text(8, y + 4, 1, sBanner, 235, 220, 190);
+        y += 20;
+    }
+    if (sToast[0]) {
+        Fill(4, y, 8 * (float)strlen(sToast) + 8, 16, 60, 10, 6, 200);
+        Text(8, y + 4, 1, sToast, 255, 230, 200);
+    }
+}
+
+static void DrawBackHold(void)
+{
+    const float w = 260, h = 26, x = (OVERLAY_WIDTH - w) / 2, y = OVERLAY_HEIGHT - 46;
+    const char *what = sOpen ? (sPage == PAGE_WAIT ? "Leaving..." : "Going back...")
+                       : OnlineInMatch() ? "Leaving the match..." : "Stopping watching...";
+    Fill(x, y, w, h, 0, 0, 0, 200);
+    Fill(x + 3, y + 3, (w - 6) * (float)sBackShown / 100, h - 6, 170, 40, 30, 255);
+    Text(x + (w - 8 * (float)strlen(what)) / 2, y + 9, 1, what, 255, 240, 220);
+}
+
+/* Each picture: the hold on Back, the online state's turns, messages, the banner. */
+static void Update(void)
+{
+    OnlineState online = OnlineGetState();
+    const char *message = OnlineTakeMessage();
+    char banner[160];
+    Uint64 now = SDL_GetTicksNS();
+
+    if (message) {
+        Toast(message);
+    }
+    {
+        /* A fight to watch began: the menu gets out of the way. */
+        static int wasWatching;
+        int watching = OnlineWatching();
+        if (watching && !wasWatching) {
+            SetOpen(0);
+        }
+        wasWatching = watching;
+    }
+    if (online != sLastOnline) {
+        if (online == ONLINE_PLAYING) {
+            SetOpen(0); /* the match begins */
+        } else if (sLastOnline == ONLINE_PLAYING) {
+            SetOpen(1); /* the match ended */
+            Go(online == ONLINE_WAITING ? PAGE_WAIT : PAGE_ONLINE);
+        } else if (online == ONLINE_IDLE && sOpen && sPage == PAGE_WAIT) {
+            Go(PAGE_ONLINE); /* the wait ended without a match */
+        } else if (online == ONLINE_SETUP && sOpen) {
+            Go(PAGE_WAIT);
+        }
+        sLastOnline = online;
+        sDirty = 1;
+    }
+    if (sToast[0] && now > sToastUntil) {
+        sToast[0] = 0;
+        sDirty = 1;
+    }
+    OnlineBanner(banner, sizeof(banner));
+    if (strcmp(banner, sBanner) != 0) {
+        snprintf(sBanner, sizeof(sBanner), "%s", banner);
+        sDirty = 1;
+    }
+    if (sBackSince && !sBackDone) {
+        /* With the menu open the hold goes back; in a match it leaves it; watching, it stops watching; otherwise
+         * Back is the game's alone. */
+        int counts = sOpen || OnlineInMatch() || OnlineWatching();
+        int percent = counts ? (int)((now - sBackSince) / 1000000ull * 100 / BACK_HOLD_MS) : 0;
+        if (percent >= 100) {
+            sBackDone = 1;
+            sBackShown = 0;
+            if (sOpen) {
+                Back();
+            } else if (OnlineInMatch()) {
+                OnlineLeave();
+            } else if (OnlineWatching()) {
+                OnlineStopWatching();
+                Toast("Stopped watching. Turn it on again on the waiting page (F1).");
+            }
+            sDirty = 1;
+        } else if (percent >= 8 && percent != sBackShown) {
+            sBackShown = percent;
+            sDirty = 1;
+        }
+    }
+    if (sOpen && sPage != PAGE_MAIN && sPage != PAGE_OPTIONS) {
+        /* the status line changes as the server answers */
+        static char lastStatus[200];
+        char status[200];
+        OnlineDescribe(status, sizeof(status));
+        if (strcmp(status, lastStatus) != 0) {
+            snprintf(lastStatus, sizeof(lastStatus), "%s", status);
+            sDirty = 1;
+        }
+    }
+}
+
+const uint32_t *OverlayPicture(int *changed)
+{
+    int show;
+    Update();
+    show = sOpen || g_settings.showFps || sBanner[0] || sToast[0] || sBackShown;
+    *changed = 0;
+    if (!sDraw || !show) {
+        if (sShown) {
+            sShown = 0;
+            *changed = 1;
+        }
+        return NULL;
+    }
+    if (sDirty || !sShown) {
+        SDL_SetRenderDrawBlendMode(sDraw, SDL_BLENDMODE_NONE);
+        SDL_SetRenderDrawColor(sDraw, 0, 0, 0, 0);
+        SDL_RenderClear(sDraw);
+        SDL_SetRenderDrawBlendMode(sDraw, SDL_BLENDMODE_BLEND);
+        if (sOpen) {
+            DrawMenu();
+        } else {
+            DrawHud();
+        }
+        if (sBackShown) {
+            DrawBackHold();
+        }
+        SDL_FlushRenderer(sDraw);
+        sDirty = 0;
+        sShown = 1;
+        *changed = 1;
+    }
+    return (const uint32_t *)sCanvas->pixels;
+}
