@@ -281,6 +281,13 @@ under 80 ms lag and 10% loss. Online the rate is agreed like the input delay (th
 1. Other states at high rates (replays, the victory and story scenes run at 30 for now).
 2. Rumble.
 
+## Credits
+
+Dojo stands on [virtualonno/bushido](https://github.com/virtualonno/bushido), the matching decompilation of
+Bushido Blade by virtualonno: the game's code, rebuilt as C source that compiles back to the original
+executable byte for byte. Without that work there would be no port. Dojo's changes to it live on the `dojo`
+branch of [tisquantum/bushido](https://github.com/tisquantum/bushido/tree/dojo), a fork of their repository.
+
 ## License
 
 Dojo's own code is released under the [MIT License](LICENSE). It covers this repository only: not the game,
