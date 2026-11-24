@@ -20,3 +20,8 @@ game_files/
 *.lib
 dojo.ini
 state_*.bin
+
+# The launcher's own settings, the game's saves and logs.
+launcher.json
+saves/
+*.log

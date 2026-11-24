@@ -12,7 +12,13 @@ cmake_minimum_required(VERSION 3.20)
 set(CMAKE_C_COMPILER_TARGET i686-pc-windows-msvc CACHE STRING "")
 project(dojo_pc C)
 
-set(REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set(DOJO_DECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." CACHE PATH
+    "The Bushido Blade decompilation the port builds the game from (not part of this repository)")
+if(NOT EXISTS "${DOJO_DECOMP_DIR}/src/main.c" OR NOT EXISTS "${DOJO_DECOMP_DIR}/include/substep.h")
+    message(FATAL_ERROR "DOJO_DECOMP_DIR (${DOJO_DECOMP_DIR}) is not the decompilation with the port's changes: "
+        "it needs src/main.c and include/substep.h")
+endif()
+set(REPO_ROOT ${DOJO_DECOMP_DIR})
 set(DOJO_DISC "${REPO_ROOT}/game_files/Bushido Blade (USA).bin" CACHE FILEPATH
     "The player's disc image; the build takes the loading-screen picture from its executable")
 
@@ -23,8 +29,9 @@ set(GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 add_custom_command(
     OUTPUT ${GENERATED_DIR}/content/now_loading.inc
     COMMAND Python3::Interpreter -I ${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_assets.py ${DOJO_DISC}
-            ${GENERATED_DIR}
+            ${GENERATED_DIR} ${REPO_ROOT}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_assets.py ${REPO_ROOT}/config/bushidoblade/assets.tsv
+            ${DOJO_DISC}
     COMMENT "Extracting the loading-screen picture from the disc image")
 add_custom_target(game_assets DEPENDS ${GENERATED_DIR}/content/now_loading.inc)
 

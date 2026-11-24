@@ -4,7 +4,7 @@
 Reads the ISO9660 file system straight out of a MODE2/2352 .bin, pulls the executable out of it and writes
 each array of config/bushidoblade/assets.tsv that the build includes, checked against the table's SHA-256.
 
-    python port/tools/extract_assets.py "game_files/Bushido Blade (USA).bin" port/build/generated
+    python port/tools/extract_assets.py "game_files/Bushido Blade (USA).bin" port/build/generated [decompilation folder]
 """
 
 import hashlib
@@ -78,11 +78,12 @@ def load_table(path):
 
 
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4):
         raise SystemExit(__doc__)
     disc = Disc(sys.argv[1])
     out_dir = sys.argv[2]
-    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # The decompilation (its asset table): the third argument, else the folder above the port.
+    repo = sys.argv[3] if len(sys.argv) == 4 else os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     root = disc.root()
 
     program = next((p for p, name in EXECUTABLES.items() if name in root), None)

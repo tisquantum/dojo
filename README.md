@@ -1,13 +1,122 @@
 # Dojo (Bushido Blade for PC)
 
-A native Windows port of the decompiled game in `src/`, with three additions the console never had: frame
-rates above the game's 30 (60, 90, 120, 144, 165 and beyond), any aspect ratio, and online play with rollback.
+A native Windows port of Bushido Blade (PlayStation, 1997), built from its decompiled source, with things the
+console never had: real frame rates above the game's 30 (60, 120, 144, 165 and beyond: the game's own logic
+runs more often, nothing is interpolated), any screen shape from 4:3 to 32:9, and online play with rollback
+netcode: quick play, private matches and King of the Hill.
 
-It needs the player's own disc image. Nothing from the disc is in this tree; the build and the game read it
-from `game_files/` (ignored by git). The North American disc, `Bushido Blade (USA).bin` with SHA-256
-`c5cba1e3…0bf`, is the supported one.
+**No game data is included.** You play with your own copy of the game; the build and the game read it from your
+disc image. Don't share builds of the game: `dojo.exe` contains the game's code.
 
-## State
+## Playing
+
+### What you need
+
+- **Windows 10 or 11, 64-bit.**
+- **A graphics card with Vulkan 1.3** (any recent NVIDIA, AMD or Intel driver). Without one, the game can use
+  its software renderer (Settings → Renderer).
+- **Your own disc image of Bushido Blade (USA)**, ripped as `.bin` + `.cue` (a raw 2352-byte-sector image;
+  an `.iso` won't work). The file names don't matter. The launcher's **Verify disc** checks it against the
+  known good copy (SHA-256 `c5cba1e3e8bc68f15e32492907ac37add7f8e8d3e10ddb36742a729ce1a970bf`).
+- **The Bushido Blade decompilation with Dojo's changes.** The game's code is built from it; it is not part of
+  this repository.
+- **Build tools** (free). The launcher checks for each and copies the install command for anything missing;
+  paste it into a terminal:
+
+  | Tool | Install |
+  |---|---|
+  | Python 3 (also runs the launcher) | `winget install Python.Python.3.12` |
+  | Clang (LLVM) | `winget install LLVM.LLVM` |
+  | Visual Studio C++ build tools | `winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"` |
+  | CMake | `winget install Kitware.CMake` |
+  | Ninja | `winget install Ninja-build.Ninja` |
+  | Vulkan SDK (optional) | `winget install KhronosGroup.VulkanSDK` |
+
+  The first build also downloads SDL 3 and the Vulkan headers (checked by SHA-256), so it needs internet.
+
+### With the launcher (recommended)
+
+1. Install the tools above, then double-click **`launcher.pyw`** in this folder (or run `python launcher.pyw`).
+2. **Game** tab: under *Disc image*, choose your `.cue`, `.bin` or the folder holding them (**File...** or
+   **Folder...**). Optionally press **Verify disc**. Under *Decompilation folder*, choose the decompilation.
+3. **Settings** tab: pick your frame rate, screen shape, resolution, full screen and so on, and your name for
+   online play. Everything saves as you change it.
+4. Press **Play**. The first time, it builds the game (a few minutes; the **Build** tab shows progress and
+   anything missing). After that, Play starts the game straight away; with *Build before playing* ticked it
+   picks up any code changes first, which takes a second when there are none.
+
+If the game closes with an error, its last output appears in the **Build** tab, and **Open game log** opens
+`dojo.log`.
+
+### Without the launcher
+
+In this folder:
+
+```
+cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=RelWithDebInfo ^
+      -DDOJO_DECOMP_DIR=<decompilation folder> -DDOJO_DISC=<your disc .bin>
+cmake --build build
+build\dojo.exe "<your disc .bin>"
+```
+
+Without `-DDOJO_DECOMP_DIR` the build looks for the decompilation in the folder above this one. Started without a disc path, `dojo.exe` looks for `game_files/Bushido Blade (USA).bin` in the folder it is
+started from or the two above it.
+
+### Controls
+
+| PlayStation | Keyboard | Gamepad |
+|---|---|---|
+| D-pad | Arrow keys | D-pad (or the left stick, if switched on) |
+| Triangle / Circle / Cross / Square | S / C / X / Z | Y / B / A / X |
+| L1 / R1 | Q / E | Shoulder buttons |
+| L2 / R2 | 1 / 3 | Triggers |
+| Start / Select | Enter / Backspace | Start / Back |
+| Options menu | F1 or Esc | Guide button |
+| Go back, leave a queue or a match | Hold Backspace for 2 seconds | Hold Back for 2 seconds |
+| Full screen | F11 | |
+
+Gamepads work as the first and second controller.
+
+### Settings
+
+The launcher's Settings tab and the in-game options menu (**F1**) change the same file, `dojo.ini`, beside
+`dojo.exe` (in `build/`). It can also be edited by hand:
+
+| Key | Values | |
+|---|---|---|
+| `fps` | `0` (match the display) or 30 to 480 in steps of 30 | The game's rate. `30` is the original exactly. Online, both players run the higher of their two rates. |
+| `aspect` | `auto`, `4:3`, `16:10`, `16:9`, `21:9`, `24:10`, `32:9` | Screen shape; `auto` matches the display. |
+| `scale` | 1 to 8 | Resolution as a multiple of the console's 320x240 (Vulkan only). |
+| `software` | 0 / 1 | 1: the software (CPU) renderer instead of Vulkan. |
+| `fullscreen`, `vsync`, `show_fps` | 0 / 1 | Full screen, v-sync, frame counter. |
+| `volume` | 0 to 100 | |
+| `analog_stick` | 0 / 1 | The left stick works the d-pad. |
+| `name` | letters, digits, `_`, `-` | Your name online. |
+| `server` | `host:port` | The matchmaking server. The official one is `dojo-matchmaker.fly.dev:7777`. |
+| `offline` | 0 / 1 | 1: never contact the server (direct matches still work). |
+| `p2p_port` | UDP port, default 7778 | The port a direct match is hosted on. |
+| `watch_hill` | 0 / 1 | Watch King of the Hill fights while waiting in line. |
+
+Frame rate, resolution, full screen, v-sync, volume and the frame counter apply at once; screen shape and
+renderer on the next start.
+
+### Online
+
+Press **F1** in the game and choose **Play online**:
+
+- **Quick play**: matched with whoever else is looking.
+- **Private match**: create a room and read its six-letter code to a friend, who joins with it. Or skip the
+  server: **Host directly** (the host forwards UDP port 7778 on their router to play over the internet) and the
+  friend uses **Join directly by address**.
+- **King of the Hill**: the winner stays on and challengers wait in line, watching the current fight. Public,
+  or private by code.
+
+Matches use rollback netcode, and players with different refresh rates can play each other. Memory cards are
+off during online matches; your own game is set aside and comes back after.
+
+## For developers
+
+### State
 
 The game boots and plays natively, with sound: the publisher's splash, the opening demo and its staff roll,
 the title menu, character and weapon select, the Story prologue, VS bouts, and the movies (the opening in the
@@ -16,17 +125,7 @@ any multiple of the console's resolution with sub-pixel geometry, in any aspect 
 the display's rate (60, 120, 144, 165 and up: the game's own logic, more often, not frames in between). Two
 machines play online with rollback, at different refresh rates too. Not yet: rumble.
 
-## Building and running
-
-Clang (LLVM for Windows), the Visual Studio 2022 x86 libraries, CMake, Ninja, Python 3 and the Vulkan SDK (for
-its shader compiler; without `VULKAN_SDK` set, the build fetches the glslang release instead). The configure
-step downloads SDL 3.2.10 and the Vulkan headers (each checked by SHA-256) into the build directory.
-
-```
-cmake -S port -B port/build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build port/build
-port/build/dojo.exe "game_files/Bushido Blade (USA).bin"
-```
+### Options, online and testing in detail
 
 Options: **F1** (or Esc, or a gamepad's guide button) opens the options menu over the game, which waits
 while it is open (online it runs on). Frame rate, resolution, full screen, vsync, volume and a frame counter

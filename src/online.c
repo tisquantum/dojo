@@ -431,6 +431,10 @@ void OnlineConnect(void)
     if (O.state != ONLINE_OFF) {
         return;
     }
+    if (g_settings.offline) {
+        Message("Offline mode: the server isn't used. Direct matches (Private Match) still work.");
+        return;
+    }
     if (!server || !*server) {
         server = g_settings.server;
     }
@@ -1178,7 +1182,8 @@ void OnlineDescribe(char *out, int size)
 {
     switch (O.state) {
     case ONLINE_OFF:
-        snprintf(out, (size_t)size, "Not connected.");
+        snprintf(out, (size_t)size, g_settings.offline ? "Offline mode: direct matches only (Private Match)."
+                                                       : "Not connected.");
         break;
     case ONLINE_CONNECTING:
         snprintf(out, (size_t)size, "Connecting to the server...");

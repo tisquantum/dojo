@@ -8,7 +8,7 @@
 
 const char *const SETTINGS_ASPECTS[SETTINGS_ASPECT_COUNT] = {"auto", "4:3", "16:10", "16:9", "21:9", "24:10", "32:9"};
 
-Settings g_settings = {0, 4, SETTINGS_ASPECT_AUTO, 0, 0, 0, 100, 0, 0, "", "dojo-matchmaker.fly.dev:7777", 7778, 1};
+Settings g_settings = {0, 4, SETTINGS_ASPECT_AUTO, 0, 0, 0, 100, 0, 0, "", "dojo-matchmaker.fly.dev:7777", 7778, 1, 0};
 
 static int sScripted;
 
@@ -19,7 +19,7 @@ static const struct {
     {"fps", &g_settings.fps},           {"scale", &g_settings.scale},   {"software", &g_settings.software},
     {"fullscreen", &g_settings.fullscreen}, {"vsync", &g_settings.vsync}, {"volume", &g_settings.volume},
     {"show_fps", &g_settings.showFps},  {"analog_stick", &g_settings.analog}, {"p2p_port", &g_settings.p2pPort},
-    {"watch_hill", &g_settings.watch},
+    {"watch_hill", &g_settings.watch},  {"offline", &g_settings.offline},
 };
 
 static void DefaultName(void)

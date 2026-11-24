@@ -288,7 +288,12 @@ static void Change(int dir)
         }
         switch (sRow) {
         case MAIN_RESUME: SetOpen(0); break;
-        case MAIN_ONLINE: OnlineConnect(); Go(PAGE_ONLINE); break;
+        case MAIN_ONLINE:
+            if (!g_settings.offline) {
+                OnlineConnect();
+            }
+            Go(PAGE_ONLINE);
+            break;
         case MAIN_OPTIONS: Go(PAGE_OPTIONS); break;
         case MAIN_QUIT: SettingsSave(); sApply(OVERLAY_CHANGE_QUIT); break;
         }
@@ -306,6 +311,10 @@ static void Change(int dir)
         }
         if (sRow == ONLINE_ROW_PRIVATE) {
             Go(PAGE_PRIVATE); /* player to player needs no server */
+            return;
+        }
+        if (g_settings.offline) {
+            Toast("Offline mode: only Private Match's direct matches work.");
             return;
         }
         if (OnlineGetState() == ONLINE_OFF) {
@@ -328,6 +337,10 @@ static void Change(int dir)
         break;
     case PAGE_PRIVATE:
         if (dir != 0) {
+            return;
+        }
+        if ((sRow == PRIVATE_CREATE || sRow == PRIVATE_JOIN) && g_settings.offline) {
+            Toast("Offline mode: rooms need the server. Host or join directly instead.");
             return;
         }
         if ((sRow == PRIVATE_CREATE || sRow == PRIVATE_JOIN) && OnlineGetState() != ONLINE_IDLE) {
