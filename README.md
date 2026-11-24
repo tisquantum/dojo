@@ -97,9 +97,10 @@ which), which player the keyboard and mouse belong to, the left stick as the d-p
 rumble. Each console button has two gamepad bindings and two keyboard-and-mouse ones (keys, mouse buttons,
 gamepad buttons, triggers or stick directions): Enter or A on a cell waits for the button to bind (Esc
 cancels, Delete clears), Delete or Y on a cell clears it, and Reset puts a row back. Rumble follows the game's
-own DualShock pulse. A DualSense on a USB cable plays it on its haptic actuators instead (through the
-controller's sound device, which Windows shows as "DualSense Wireless Controller"); over Bluetooth, or with
-DualSense haptics off, it gets SDL's motor rumble.
+own DualShock pulse (sent on hits). A DualSense on a USB cable gets HD haptics instead, through the
+controller's sound device (Windows shows it as "DualSense Wireless Controller"): the game's sound effects
+(footsteps, swings, clashes, hits; not its music, speech or ambience), as taps where each begins, with the hit
+pulse on top. Over Bluetooth, or with DualSense haptics off, it gets SDL's motor rumble.
 
 The launcher's Controls tab has the same settings: click a cell, then press the key, mouse button or gamepad
 button (right-click clears it); *Test rumble* shakes a player's gamepad. The launcher reads the gamepads itself,
