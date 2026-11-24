@@ -132,6 +132,7 @@ The launcher's Settings tab and the in-game options menu (**F1**) change the sam
 | `server` | `host:port` | The matchmaking server. The official one is `dojo-matchmaker.fly.dev:7777`. |
 | `offline` | 0 / 1 | 1: never contact the server (direct matches still work). |
 | `p2p_port` | UDP port, default 7778 | The port a direct match is hosted on. |
+| `online_delay` | `-1` (auto) or 0 to 8 | Online input delay in fields (1/60 s). Auto measures the round trip while the match is set up and takes the least that leaves rollback a field or two to hide: 0 on a LAN, 1 at about 70 ms, 2 from 100 ms. Both players get the larger of their two choices. |
 | `watch_hill` | 0 / 1 | Watch King of the Hill fights while waiting in line. |
 
 Frame rate, resolution, full screen, v-sync, volume and the frame counter apply at once; aspect ratio and

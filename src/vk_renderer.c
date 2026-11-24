@@ -828,17 +828,18 @@ static void CreateSwapchain(void)
             break;
         }
     }
-    /* The host paces frames itself: without vsync, present without waiting when the display allows it
-     * (mailbox, else immediate); with it, each picture waits for the display's refresh. */
+    /* The host paces frames itself. Without vsync a picture goes to the display the moment it is done
+     * (immediate: the least latency, at the cost of tearing; else mailbox, which holds it to the refresh);
+     * with it, each picture waits for the display's refresh. */
     V.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     if (!V.vsync) {
         for (i = 0; i < modeCount; i++) {
-            if (modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR && V.presentMode == VK_PRESENT_MODE_FIFO_KHR) {
+            if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR && V.presentMode == VK_PRESENT_MODE_FIFO_KHR) {
                 V.presentMode = modes[i];
             }
         }
         for (i = 0; i < modeCount; i++) {
-            if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
+            if (modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) {
                 V.presentMode = modes[i];
             }
         }
@@ -855,7 +856,10 @@ static void CreateSwapchain(void)
         return; /* minimized */
     }
     info.surface = V.windowSurface;
-    info.minImageCount = caps.minImageCount + 1;
+    /* As few images as the display allows (two, double buffering): every frame is finished before the next
+     * begins (SubmitAndWait), so a third would only let one more picture wait in the vsync queue, a refresh
+     * of latency. */
+    info.minImageCount = caps.minImageCount > 2 ? caps.minImageCount : 2;
     if (caps.maxImageCount && info.minImageCount > caps.maxImageCount) {
         info.minImageCount = caps.maxImageCount;
     }

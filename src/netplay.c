@@ -26,7 +26,7 @@
 #include "spu.h"
 
 #define MAGIC          0x504E4242u /* "BBNP" */
-#define VERSION        3
+#define VERSION        4
 #define RING           64          /* fields of inputs and states kept */
 #define MAX_ROLLBACK   12          /* how far a machine may run on predictions */
 #define MAX_SEND       60
@@ -370,6 +370,12 @@ static uint16_t RemoteInputFor(uint32_t field)
     return N.remoteKnown > 0 ? N.remoteInputs[(N.remoteKnown - 1) % RING] : 0;
 }
 
+unsigned NetplayFilterButtons(unsigned buttons)
+{
+    extern short gGameState;
+    return gGameState == 2 /* GAME_STATE_UPDATE_COMBAT */ ? buttons & ~(1u << 11) : buttons;
+}
+
 /* Runs one field: saves the state before it, writes both controllers, and lets the game run to the next
  * vertical blank, through any ticks that end before it (each shown, unless the field is run again after a
  * rollback, which is neither drawn nor heard). */
@@ -384,8 +390,8 @@ static void RunGameField(uint32_t field, int again)
     SaveStateSave(state);
     N.stateField[field % RING] = field;
     N.usedRemote[field % RING] = remote;
-    HostWritePadPort(N.local, 1, local, NULL);
-    HostWritePadPort(1 - N.local, 1, remote, NULL);
+    HostWritePadPort(N.local, 1, NetplayFilterButtons(local), NULL);
+    HostWritePadPort(1 - N.local, 1, NetplayFilterButtons(remote), NULL);
     for (;;) {
         ContextSwitchToGame();
         if (KernelLastYieldWasBlank()) {

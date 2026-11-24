@@ -24,6 +24,10 @@ typedef struct NetplayTransport {
 void NetplayBegin(const NetplayTransport *transport, int local, int delay);
 void NetplayEnd(void);
 int NetplayLocalPlayer(void);
+/* A controller's buttons as an online match lets the game see them: no Start in a fight, whose pause would
+ * stop both players' games (and, held with the rest, quit them). Applied to both players' inputs where the
+ * simulation reads them, players' and spectators' alike, so every machine filters the same. */
+unsigned NetplayFilterButtons(unsigned buttons);
 /* How long the other machine has been silent, in ms. */
 uint32_t NetplaySilentMs(void);
 /* The game state and bout winner (gMatchWinnerSide: -1, or the winning side) after the newest field both

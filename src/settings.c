@@ -10,7 +10,7 @@
 const char *const SETTINGS_ASPECTS[SETTINGS_ASPECT_COUNT] = {"auto", "4:3", "16:10", "16:9", "21:9", "24:10", "32:9"};
 
 Settings g_settings = {0, 4, SETTINGS_ASPECT_AUTO, 0, 0, 0, 100, 0, 0, 50, 100, 1, 0, {"auto", "auto"}, {"", ""}, {{0}},
-                       "", "dojo-matchmaker.fly.dev:7777", 7778, 1, 0};
+                       "", "dojo-matchmaker.fly.dev:7777", 7778, 1, 0, -1};
 
 static int sScripted;
 
@@ -23,6 +23,7 @@ static const struct {
     {"show_fps", &g_settings.showFps},  {"analog_stick", &g_settings.analog}, {"p2p_port", &g_settings.p2pPort},
     {"watch_hill", &g_settings.watch},  {"offline", &g_settings.offline}, {"stick_deadzone", &g_settings.deadzone},
     {"rumble", &g_settings.rumble},     {"dualsense_haptics", &g_settings.haptics},
+    {"online_delay", &g_settings.onlineDelay},
 };
 
 /* The settings that are text. */
@@ -136,6 +137,7 @@ void SettingsLoad(int scripted)
     g_settings.volume = Clamp(g_settings.volume, 0, 100);
     g_settings.deadzone = Clamp(g_settings.deadzone, 10, 90);
     g_settings.rumble = Clamp(g_settings.rumble, 0, 100);
+    g_settings.onlineDelay = Clamp(g_settings.onlineDelay, -1, 8);
 }
 
 void SettingsSave(void)

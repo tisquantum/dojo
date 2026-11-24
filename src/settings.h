@@ -29,6 +29,7 @@ typedef struct Settings {
     int p2pPort;    /* the UDP port a player-to-player match is hosted on */
     int watch;      /* King of the Hill: watch the match while waiting in line */
     int offline;    /* never contact the matchmaking server (direct player-to-player matches still work) */
+    int onlineDelay; /* online input delay in fields: -1 picks the least the connection allows */
 } Settings;
 
 #define SETTINGS_ASPECT_COUNT 7

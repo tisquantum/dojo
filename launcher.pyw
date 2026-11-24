@@ -262,7 +262,7 @@ DEFAULTS = {
     "aspect": "auto", "name": default_name(), "server": "dojo-matchmaker.fly.dev:7777",
     "fps": 0, "scale": 4, "software": 0, "fullscreen": 0, "vsync": 0, "volume": 100, "show_fps": 0,
     "analog_stick": 0, "p2p_port": 7778, "watch_hill": 1, "offline": 0, "stick_deadzone": 50, "rumble": 100,
-    "dualsense_haptics": 1, "keyboard_player": 1,
+    "dualsense_haptics": 1, "keyboard_player": 1, "online_delay": -1,
 }
 
 
@@ -1017,12 +1017,16 @@ class Launcher:
         entry(8, 2, "Direct-match port (UDP)", "p2p_port", width=8, kind=int)
         check(9, 2, "Watch King of the Hill fights while waiting", "watch_hill")
         check(10, 2, "Offline mode: never contact the server (direct matches still work)", "offline")
+        combo(11, 2, "Input delay", "online_delay",
+              ["Auto (lowest for the connection)"] + ["%d frame%s (%d ms)" % (d, "" if d == 1 else "s",
+                                                                           round(d * 1001 / 60)) for d in range(9)],
+              list(range(-1, 9)))
 
         ttk.Label(tab, text="These are saved to dojo.ini beside the game. The in-game options menu (F1) "
                   "changes the same settings.", style="Sub.TLabel", wraplength=640).grid(
-            row=11, column=0, columnspan=4, sticky="w", pady=(18, 0))
+            row=12, column=0, columnspan=4, sticky="w", pady=(18, 0))
         ttk.Button(tab, text="Reset to defaults", command=self.reset_settings).grid(
-            row=12, column=0, sticky="w", pady=(8, 0))
+            row=13, column=0, sticky="w", pady=(8, 0))
 
     def build_server_row(self, tab, row, col, value):
         """The matchmaking server: the official one, locked, unless the player confirms they want another."""

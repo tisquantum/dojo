@@ -24,7 +24,8 @@ typedef enum Page {
 
 enum { MAIN_RESUME, MAIN_ONLINE, MAIN_OPTIONS, MAIN_CONTROLS, MAIN_QUIT, MAIN_COUNT };
 enum {
-    OPT_FPS, OPT_SCALE, OPT_ASPECT, OPT_RENDERER, OPT_DISPLAY, OPT_VSYNC, OPT_VOLUME, OPT_COUNTER, OPT_BACK, OPT_COUNT
+    OPT_FPS, OPT_SCALE, OPT_ASPECT, OPT_RENDERER, OPT_DISPLAY, OPT_VSYNC, OPT_VOLUME, OPT_COUNTER, OPT_DELAY,
+    OPT_BACK, OPT_COUNT
 };
 /* The controls page: the devices and rumble, then a row of bindings for each console button. */
 enum {
@@ -43,7 +44,8 @@ static const char *const sTitles[PAGE_COUNT] = {"DOJO",          "OPTIONS",     
                                                 "PRIVATE MATCH", "ENTER A CODE", "PLAY ONLINE"};
 static const char *const sMainLabels[MAIN_COUNT] = {"Resume", "Play online", "Options", "Controls", "Quit game"};
 static const char *const sOptionLabels[OPT_COUNT] = {
-    "Frame rate", "Resolution", "Aspect ratio", "Renderer", "Display", "VSync", "Volume", "Frame counter", "Back",
+    "Frame rate", "Resolution", "Aspect ratio", "Renderer", "Display", "VSync", "Volume", "Frame counter",
+    "Online input delay", "Back",
 };
 static const char *const sControlLabels[CTL_BIND] = {
     "Player 1 gamepad", "Player 2 gamepad", "Keyboard & mouse", "Left stick moves", "Stick dead zone", "Rumble",
@@ -225,6 +227,9 @@ static void ChangeOption(int dir)
         break;
     case OPT_COUNTER:
         s->showFps = !s->showFps;
+        break;
+    case OPT_DELAY:
+        s->onlineDelay = Step(s->onlineDelay, dir ? dir : 1, -1, 8); /* the next match on */
         break;
     case OPT_BACK:
         if (dir == 0) {
@@ -739,6 +744,14 @@ static void OptionValue(int row, char *out, size_t size)
         break;
     case OPT_COUNTER:
         snprintf(out, size, "%s", s->showFps ? "On" : "Off");
+        break;
+    case OPT_DELAY:
+        if (s->onlineDelay < 0) {
+            snprintf(out, size, "Auto (the least the connection allows)");
+        } else {
+            snprintf(out, size, "%d field%s (%d ms)", s->onlineDelay, s->onlineDelay == 1 ? "" : "s",
+                     (s->onlineDelay * 1001 + 30) / 60);
+        }
         break;
     default:
         out[0] = 0;

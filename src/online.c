@@ -36,11 +36,13 @@
 
 #define PROTOCOL        1
 #define ONLINE_MARGIN   380  /* every online match runs the widest simulation; each display shows its part */
-#define ONLINE_DELAY    2
+#define FIELD_MS        16.683 /* a console field, the unit of input delay */
+#define DELAY_FALLBACK  2      /* the input delay when the round trip couldn't be measured */
+#define DELAY_DECIDE_MS 4000   /* setup decides its input delay by then, measured or not */
 /* Raised whenever a change makes the same inputs play out differently (the game's code, not its data, so the
  * starting state's hash alone can't tell): mixed into that hash, it turns away a player on another version.
- * 2: rain and foliage across the widescreen margin (0.1.5). */
-#define SIM_REVISION    2
+ * 2: rain and foliage across the widescreen margin (0.1.5). 3: no pausing in a fight (0.1.6). */
+#define SIM_REVISION    3
 #define PUNCH_MS        150
 #define RELAY_AFTER_MS  1500 /* no direct answer by then: through the server */
 #define SETUP_GIVE_UP_MS 20000
@@ -92,6 +94,10 @@ static struct {
     uint32_t setupStartMs, lastPunchMs;
     int haveHello, sentReady, peerReady;
     int peerTicks, peerDelay;
+    int ownDelay;          /* the input delay this machine asks for, -1 until decided; then it stays */
+    uint32_t rttMs;        /* the shortest round trip measured on the path in use */
+    int rttSamples;
+    int rttDirect;         /* whether the samples are the direct path's */
     uint64_t peerHash;
     int ticks, delay;
     int winnerSide;        /* the bout's winner seen settled, or -1 */
@@ -665,6 +671,9 @@ static void BeginSetupAddress(uint32_t matchId, int role, const struct sockaddr_
     snprintf(O.peerName, sizeof(O.peerName), "%s", name);
     O.direct = 0;
     O.haveHello = O.sentReady = O.peerReady = 0;
+    O.ownDelay = -1;
+    O.rttMs = 0;
+    O.rttSamples = O.rttDirect = 0;
     O.setupStartMs = NowMs();
     O.lastPunchMs = 0;
     O.winnerSide = -1;
@@ -793,6 +802,24 @@ static void PeerLine(char *line, int direct)
             fprintf(stderr, "online: connected directly\n");
         }
         O.direct = 1;
+    } else if (strcmp(word, "PING") == 0) {
+        unsigned long sent;
+        if (sscanf(line, "%lu", &sent) == 1) {
+            SendPeerText("PONG %lu", sent);
+        }
+    } else if (strcmp(word, "PONG") == 0) {
+        unsigned long sent;
+        uint32_t rtt;
+        if (sscanf(line, "%lu", &sent) == 1 && (rtt = NowMs() - (uint32_t)sent) < 5000) {
+            if (O.direct && !O.rttDirect) {
+                O.rttSamples = 0; /* the direct path from here on: the relay's times say nothing of it */
+                O.rttDirect = 1;
+            }
+            if (O.rttSamples == 0 || rtt < O.rttMs) {
+                O.rttMs = rtt;
+            }
+            O.rttSamples++;
+        }
     } else if (strcmp(word, "HELLO") == 0) {
         unsigned long long hash;
         char name[40];
@@ -890,14 +917,40 @@ static void StartMatch(void)
             O.direct ? "direct" : "relayed", O.ticks);
 }
 
+/* The input delay to ask for: the setting, or on Auto the least that leaves rollback a field or two to
+ * hide, from the round trip measured while setting up (0 on a LAN, 1 at about 70 ms, 2 from 100). Decided
+ * once, when the path has settled and been timed, so both machines agree on it (each takes the larger). */
+static void DecideDelay(uint32_t now)
+{
+    int settled = O.direct || O.serverless || now - O.setupStartMs >= RELAY_AFTER_MS;
+    if (O.ownDelay >= 0) {
+        return;
+    }
+    if (g_settings.onlineDelay >= 0) {
+        O.ownDelay = g_settings.onlineDelay;
+    } else if (settled && O.rttSamples >= 3) {
+        int fields = (int)(O.rttMs / 2.0 / FIELD_MS + 0.5) - 1;
+        O.ownDelay = fields < 0 ? 0 : (fields > 8 ? 8 : fields);
+    } else if (now - O.setupStartMs >= DELAY_DECIDE_MS) {
+        O.ownDelay = O.rttSamples ? (int)(O.rttMs / 2.0 / FIELD_MS + 0.5) : DELAY_FALLBACK;
+        O.ownDelay = O.ownDelay > 8 ? 8 : O.ownDelay;
+    } else {
+        return;
+    }
+    fprintf(stderr, "online: input delay %d fields asked for (round trip %u ms, %d samples)\n", O.ownDelay,
+            (unsigned)O.rttMs, O.rttSamples);
+}
+
 static void UpdateSetup(void)
 {
     uint32_t now = NowMs();
+    DecideDelay(now);
     if (now - O.lastPunchMs >= PUNCH_MS) {
         O.lastPunchMs = now;
         SendPeerText("PUNCH");
-        if (O.start) {
-            SendPeerText("HELLO %d %d %016llx %s", HostOwnTicksPerFrame(), ONLINE_DELAY, (unsigned long long)O.startHash,
+        SendPeerText("PING %lu", (unsigned long)now);
+        if (O.start && O.ownDelay >= 0) {
+            SendPeerText("HELLO %d %d %016llx %s", HostOwnTicksPerFrame(), O.ownDelay, (unsigned long long)O.startHash,
                          g_settings.name);
         }
         if (O.sentReady) {
@@ -907,7 +960,7 @@ static void UpdateSetup(void)
     if (!O.start) {
         return; /* still preparing */
     }
-    if (O.haveHello && !O.sentReady) {
+    if (O.haveHello && !O.sentReady && O.ownDelay >= 0) {
         if (O.peerHash != O.startHash) {
             SendPeerText("BYE");
             SendServer("LEAVE");
@@ -917,7 +970,7 @@ static void UpdateSetup(void)
             return;
         }
         O.ticks = O.peerTicks > HostOwnTicksPerFrame() ? O.peerTicks : HostOwnTicksPerFrame();
-        O.delay = O.peerDelay > ONLINE_DELAY ? O.peerDelay : ONLINE_DELAY;
+        O.delay = O.peerDelay > O.ownDelay ? O.peerDelay : O.ownDelay;
         O.sentReady = 1;
         SendPeerText("READY");
     }
@@ -1107,8 +1160,8 @@ static void RunWatchedField(int quietly)
         fprintf(stderr, "watch: match %lu field %lu hash %016llx\n", (unsigned long)O.W.matchId,
                 (unsigned long)O.W.next, (unsigned long long)SaveStateHash());
     }
-    HostWritePadPort(0, 1, pads & 0xFFFF, NULL);
-    HostWritePadPort(1, 1, pads >> 16, NULL);
+    HostWritePadPort(0, 1, NetplayFilterButtons(pads & 0xFFFF), NULL);
+    HostWritePadPort(1, 1, NetplayFilterButtons(pads >> 16), NULL);
     for (;;) {
         ContextSwitchToGame();
         if (KernelLastYieldWasBlank()) {
@@ -1233,9 +1286,9 @@ void OnlineBanner(char *out, int size)
             }
         }
         if (O.mode == ONLINE_KOTH) {
-            snprintf(out, (size_t)size, "vs %s   %u ms   King of the Hill", O.peerName, rtt);
+            snprintf(out, (size_t)size, "vs %s   %u ms   delay %d   King of the Hill", O.peerName, rtt, O.delay);
         } else {
-            snprintf(out, (size_t)size, "vs %s   %u ms", O.peerName, rtt);
+            snprintf(out, (size_t)size, "vs %s   %u ms   delay %d", O.peerName, rtt, O.delay);
         }
     } else if (O.state == ONLINE_WAITING || O.state == ONLINE_SETUP) {
         OnlineDescribe(out, size);
