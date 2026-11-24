@@ -7,9 +7,15 @@ from the fork), so a player unpacks it, opens Dojo.exe, points it at their own d
 install or download. No game data is in it: the game is built on the player's machine from that source and
 their disc.
 
+Beside it go Dojo-<version>-update.zip (the same without the toolchain, which rarely changes) and
+dojo-update.json, the manifest the launcher reads from the latest release to update itself. Upload all three to
+the GitHub release (tag v<version>): a release without dojo-update.json isn't seen by the launchers out there.
+
     python tools/make_release.py            (needs PyInstaller: pip install pyinstaller)
 """
 
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -20,6 +26,7 @@ import zipfile
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST = os.path.join(HERE, "dist")
+DOWNLOADS = "https://github.com/tisquantum/dojo/releases/download/v%s/%s"
 
 THIRD_PARTY = """# Third-party software in this release
 
@@ -117,12 +124,45 @@ def main():
 
     archive = os.path.join(DIST, "%s-windows.zip" % name)
     print("zipping", archive, flush=True)
+    zip_folder(stage, archive, name + "/")
+    update = os.path.join(DIST, "%s-update.zip" % name)
+    print("zipping", update, flush=True)
+    zip_folder(stage, update, "", skip="toolchain")
+
+    with open(os.path.join(toolchain, "TOOLCHAIN_VERSION")) as f:
+        toolchain_version = f.read().strip()
+    manifest = {
+        "version": ver,
+        "notes": "https://github.com/tisquantum/dojo/releases/tag/v%s" % ver,
+        "toolchain": toolchain_version,
+        "update": package(update, ver),
+        "full": dict(package(archive, ver), prefix=name + "/"),
+    }
+    with open(os.path.join(DIST, "dojo-update.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    for path in (archive, update):
+        print("done: %s (%.0f MB)" % (path, os.path.getsize(path) / 1e6))
+    print("upload both zips and dist/dojo-update.json to the release v%s" % ver)
+
+
+def zip_folder(folder, archive, prefix, skip=None):
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-        for dirpath, _, files in os.walk(stage):
+        for dirpath, dirs, files in os.walk(folder):
+            if dirpath == folder and skip in dirs:
+                dirs.remove(skip)
             for file in files:
                 full = os.path.join(dirpath, file)
-                z.write(full, os.path.join(name, os.path.relpath(full, stage)))
-    print("done: %s (%.0f MB)" % (archive, os.path.getsize(archive) / 1e6))
+                z.write(full, prefix + os.path.relpath(full, folder).replace(os.sep, "/"))
+
+
+def package(path, ver):
+    """An asset's entry in the manifest: where the release has it, and what it must hash to."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 22), b""):
+            digest.update(chunk)
+    return {"url": DOWNLOADS % (ver, os.path.basename(path)), "sha256": digest.hexdigest(),
+            "size": os.path.getsize(path)}
 
 
 if __name__ == "__main__":

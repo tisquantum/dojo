@@ -52,8 +52,14 @@ is built on your PC from that source and your disc, because a finished game can'
    that, Play starts the game straight away.
 
 If the game closes with an error, its last output appears in the **Build** tab, and **Open game log** opens
-`dojo.log`. Your saves are in `saves/` and your settings in `build/dojo.ini`; keep those two when moving to a
-new version.
+`dojo.log`. Your saves are in `saves/` and your settings in `build/dojo.ini`.
+
+**Updates install themselves.** When the launcher opens it checks the latest release on GitHub; if there's a
+newer version it downloads it (a few MB: the toolchain only comes along when it changed), checks its SHA-256,
+and once the game is closed puts it in place and reopens. Your saves and settings stay. Play then rebuilds the
+game from the new source. Untick *Keep Dojo up to date* on the Game tab to be asked instead (a banner with
+**Update now**). Versions before 0.1.2 can't update themselves: download that one by hand, keeping `saves/` and
+`build/dojo.ini`.
 
 ### Without the launcher
 
@@ -73,6 +79,8 @@ looks for `game_files/Bushido Blade (USA).bin` in the folder it is started from 
 
 ### Controls
 
+The defaults (every button can be rebound in the in-game menu: **F1**, Controls):
+
 | PlayStation | Keyboard | Gamepad |
 |---|---|---|
 | D-pad | Arrow keys | D-pad (or the left stick, if switched on) |
@@ -84,7 +92,14 @@ looks for `game_files/Bushido Blade (USA).bin` in the folder it is started from 
 | Go back, leave a queue or a match | Hold Backspace for 2 seconds | Hold Back for 2 seconds |
 | Full screen | F11 | |
 
-Gamepads work as the first and second controller.
+The Controls page picks each player's gamepad (auto takes the first free one; with several plugged in, choose
+which), which player the keyboard and mouse belong to, the left stick as the d-pad and its dead zone, and
+rumble. Each console button has two gamepad bindings and two keyboard-and-mouse ones (keys, mouse buttons,
+gamepad buttons, triggers or stick directions): Enter or A on a cell waits for the button to bind (Esc
+cancels, Delete clears), Delete or Y on a cell clears it, and Reset puts a row back. Rumble follows the game's
+own DualShock pulse. A DualSense on a USB cable plays it on its haptic actuators instead (through the
+controller's sound device, which Windows shows as "DualSense Wireless Controller"); over Bluetooth, or with
+DualSense haptics off, it gets SDL's motor rumble.
 
 ### Settings
 
@@ -100,6 +115,12 @@ The launcher's Settings tab and the in-game options menu (**F1**) change the sam
 | `fullscreen`, `vsync`, `show_fps` | 0 / 1 | Full screen, v-sync, frame counter. |
 | `volume` | 0 to 100 | |
 | `analog_stick` | 0 / 1 | The left stick works the d-pad. |
+| `stick_deadzone` | 10 to 90 | How far, in percent, a stick goes before it counts as a direction. |
+| `rumble` | 0 to 100 | Rumble strength; 0 is off. |
+| `dualsense_haptics` | 0 / 1 | A wired DualSense rumbles with its haptic actuators. |
+| `pad1`, `pad2` | `auto`, `none` or an SDL GUID | Each player's gamepad (`pad1_name`, `pad2_name`: its name). |
+| `keyboard_player` | 1 / 2 | The player the keyboard and mouse belong to. |
+| `bind_cross` ... `bind_right` | four hex numbers | Two gamepad, then two keyboard-and-mouse bindings (`src/input.h`); 0 is none. |
 | `name` | letters, digits, `_`, `-` | Your name online. |
 | `server` | `host:port` | The matchmaking server. The official one is `dojo-matchmaker.fly.dev:7777`. |
 | `offline` | 0 / 1 | 1: never contact the server (direct matches still work). |
@@ -130,7 +151,10 @@ Working from a checkout of this repository: `python tools/fetch_toolchain.py` do
 each checked by SHA-256), then `python launcher.pyw` works as the release's `Dojo.exe` does. Everyone builds
 with the same tools and the build is reproducible (no timestamps or folder names in the program), so a given
 version builds to the same bytes on every PC, which online play relies on. `python tools/make_release.py`
-makes the release zip in `dist/` (it needs PyInstaller for `Dojo.exe`). Releases build `Release`;
+makes the release zip in `dist/` (it needs PyInstaller for `Dojo.exe`), plus `Dojo-<version>-update.zip` and
+`dojo-update.json`: upload all three to the GitHub release tagged `v<version>`, or the launchers out there won't
+see it (they read `releases/latest/download/dojo-update.json`). `DOJO_UPDATE_URL` points a launcher at another
+manifest for testing; a checkout never replaces its own files. Releases build `Release`;
 `RelWithDebInfo` adds a PDB for crash addresses and `tools/statediff.py`.
 
 ### State
@@ -172,7 +196,8 @@ take the larger). The window title shows the round trip, the rollbacks and any d
 an online match. `DOJO_NET_LAG` (ms) and `DOJO_NET_LOSS` (percent) simulate a bad network.
 
 Keyboard: arrows, Z square, X cross, C circle, S triangle, Q L1, E R1, 1 L2, 3 R2, Enter start, Backspace
-select; F11 full screen. Gamepads work as the first and second controller. Saves go to `saves/bu00`.
+select; F11 full screen (all rebindable in F1, Controls). Saves go to `saves/bu00`. `DOJO_MENU_KEYS`
+("Down,Down,Return", SDL key names) presses keys in the menu `DOJO_MENU_AT` opens, for testing its pages.
 
 For development: `port/check.sh` syntax-checks the game against the SDK headers; `port/undefined.sh`
 builds and lists what the link still lacks. Scripted runs use environment variables: `DOJO_PRESS`
@@ -270,16 +295,27 @@ look angles, particles, waves (`PC_SHARE`; a per-frame damping or approach becom
 console's frame: pad edges, the CPU's decisions, hits and clashes, timers and lifetimes, spawns, sounds, the
 cloth solve (drawn carried with the body between solves), every `rand()`. Every macro is the original code with
 one tick a frame and on the console (`include/substep.h` keeps the matching build), and frames of any state that
-doesn't substep (menus, loading, replays) run as one tick at any rate, so `DOJO_FPS=30` is the console's game:
+doesn't substep (menus, loading) run as one tick at any rate, so `DOJO_FPS=30` is the console's game:
 a 6000-field run with three bouts compares equal to the build before these changes in every variable and all of
 main RAM (`tools/statediff.py`). At 60, 120, 144 and 480 runs are deterministic and pass the save-state round
 trip; online, a 60 Hz and a 120 Hz machine agree on 4 ticks and settled 149 of 149 hashes equal through rollbacks
 under 80 ms lag and 10% loss. Online the rate is agreed like the input delay (the faster).
 
+The scenes the fighters play in substep the same way (`PcStateSubsteps`): the attract mode's bout, the replay,
+the victory and continue screens, and the Slash-clear and castle-approach cutscenes, whose camera sweeps count
+in ticks (`PC_TICKS`) and whose scripted buttons are held through a frame's ticks as a pad's are. The replay
+shows the bout as it was played: the console's ring records a frame's last tick, and the port's
+(`sPcReplayTicks` in `src/replay.c`) the ticks before it, which playback shows on the same ticks of each frame
+(a bout played at another rate shows the recorded ticks nearest its own). Thrown and kicked sub-weapons fly by ticks
+too, their hits still tested once a frame along the whole frame's path. The story's dialogue cutscenes and the
+title's flyover play camera and pose tracks baked at 30 frames a second, so they still show each frame for a
+whole frame's ticks. At 30 a run through three replays, victory and continue screens and an attract-mode bout
+compares equal to the build before in all of main RAM and every variable (bar the known uninitialised-stack
+noise); at 120 runs are deterministic and pass the save-state round trip in each of those states.
+
 ## Order of work
 
-1. Other states at high rates (replays, the victory and story scenes run at 30 for now).
-2. Rumble.
+Rumble is done (`src/input.c`); nothing else is queued.
 
 ## Credits
 

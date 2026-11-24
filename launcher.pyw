@@ -5,6 +5,10 @@ In a release it is Dojo.exe beside the source, the game's decompiled source (dec
 the decompiled source there). It builds the game with the bundled tools and starts it. It keeps its own choices
 in launcher.json, writes the game's options to build/dojo.ini (the file the in-game options menu, F1, changes
 too), and runs the game in this folder, so the memory-card saves live in saves/ here.
+
+A release keeps itself up to date: when it opens it reads the latest release's dojo-update.json on GitHub, and
+when that names a newer version it downloads it, checks it, and (after the launcher and the game have closed)
+a small script puts the new files in place and opens the new launcher. Play then rebuilds the game.
 """
 
 import hashlib
@@ -15,13 +19,14 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import urllib.request
 import zipfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-DOJO_VERSION = "0.1.1"
+DOJO_VERSION = "0.1.2"
 
 # The folder of Dojo.exe in a release, of this file in a checkout.
 PORT_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
@@ -31,7 +36,7 @@ DECOMP_DIR = os.path.join(PORT_DIR, "decomp")
 
 # The decompilation, with Dojo's changes, this version is built from: a branch of a fork of the decompilation,
 # fetched at this exact commit.
-DECOMP_COMMIT = "276a3af20be7c51b0e7d72f6d90cbe6814419ad6"
+DECOMP_COMMIT = "c95a621e9ed7c31bcd0420cda6735762016c2751"
 DECOMP_URL = "https://github.com/tisquantum/bushido/archive/%s.zip" % DECOMP_COMMIT
 DECOMP_STAMP = ".dojo-decomp"
 BUILD_DIR = os.path.join(PORT_DIR, "build")
@@ -40,6 +45,49 @@ INI = os.path.join(BUILD_DIR, "dojo.ini")
 LAUNCHER_JSON = os.path.join(PORT_DIR, "launcher.json")
 GAME_LOG = os.path.join(PORT_DIR, "dojo.log")
 SAVES = os.path.join(PORT_DIR, "saves")
+
+# Updates: the manifest tools/make_release.py writes, uploaded to every release. DOJO_UPDATE_URL points a test at
+# another manifest (and turns updates on in a checkout, which otherwise never updates itself: git does that).
+UPDATE_MANIFEST = os.environ.get("DOJO_UPDATE_URL") or \
+    "https://github.com/tisquantum/dojo/releases/latest/download/dojo-update.json"
+UPDATES = getattr(sys, "frozen", False) or bool(os.environ.get("DOJO_UPDATE_URL"))
+UPDATE_STAGE = os.path.join(PORT_DIR, "update.new")
+UPDATE_LOG = os.path.join(PORT_DIR, "update.log")
+UPDATE_FAILED = os.path.join(PORT_DIR, "update.failed")
+
+# Run by cmd once the launcher has gone: waits for its processes (PyInstaller's and Python's) to end, mirrors
+# each folder of the new version over this one (so files a version dropped go too), then copies the files at the
+# top, Dojo.exe last of all, so a failure part way leaves the old launcher, which tries again.
+UPDATE_SCRIPT = r"""@echo off
+setlocal
+set FAILED=
+for %%p in (%DOJO_PIDS%) do call :wait %%p
+for /D %%d in ("%DOJO_STAGE%\*") do call :mirror "%%d" "%DOJO_HOME%\%%~nxd"
+if defined FAILED goto done
+robocopy "%DOJO_STAGE%" "%DOJO_HOME%" /XF Dojo.exe /R:30 /W:1 /NP /NJH /NDL
+if errorlevel 8 set FAILED=1
+if defined FAILED goto done
+robocopy "%DOJO_STAGE%" "%DOJO_HOME%" Dojo.exe /R:30 /W:1 /NP /NJH /NDL
+if errorlevel 8 set FAILED=1
+:done
+if defined FAILED (echo failed> "%DOJO_HOME%\update.failed") else (rmdir /s /q "%DOJO_STAGE%")
+if "%DOJO_RELAUNCH%"=="1" start "" /D "%DOJO_HOME%" "%DOJO_HOME%\Dojo.exe"
+exit /b
+
+:wait
+set /a WAITED=0
+:waiting
+tasklist /FI "PID eq %1" /NH 2>nul | find " %1 " >nul || exit /b
+set /a WAITED+=1
+if %WAITED% gtr 60 exit /b
+ping -n 2 127.0.0.1 >nul
+goto waiting
+
+:mirror
+robocopy %1 %2 /MIR /R:30 /W:1 /NP /NJH /NDL /NFL
+if errorlevel 8 set FAILED=1
+exit /b
+"""
 
 # The disc the port is made from (the decompilation's README lists it).
 KNOWN_DISCS = {
@@ -142,6 +190,8 @@ def apply_theme(root):
     style.configure("Good.TLabel", background=PANEL, foreground=GOOD)
     style.configure("Bad.TLabel", background=PANEL, foreground=BAD)
     style.configure("Warn.TLabel", background=PANEL, foreground=WARN)
+    style.configure("Banner.TFrame", background=FIELD)
+    style.configure("Banner.TLabel", background=FIELD, foreground=PAPER)
 
     style.configure("TNotebook", background=INK, borderwidth=0, tabmargins=(12, 6, 12, 0))
     style.configure("TNotebook.Tab", background=INK, foreground=MUTED, padding=(18, 7), borderwidth=1,
@@ -241,6 +291,14 @@ def save_ini(values):
     os.makedirs(BUILD_DIR, exist_ok=True)
     lines = ["; Dojo: the options menu (F1) writes this file.\n"]
     lines += ["%s = %s\n" % (key, values[key]) for key in DEFAULTS]
+    # The game's own settings the launcher doesn't show (the controls page's bindings and gamepads) stay.
+    try:
+        with open(INI, encoding="utf-8", errors="replace") as f:
+            lines += [line if line.endswith("\n") else line + "\n" for line in f
+                      if "=" in line and not line.lstrip().startswith(";")
+                      and line.split("=", 1)[0].strip() not in DEFAULTS]
+    except OSError:
+        pass
     with open(INI, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
@@ -324,6 +382,25 @@ def toolchain_version():
         return None
 
 
+def version_key(text):
+    return tuple(int(n) for n in re.findall(r"\d+", text))
+
+
+def extract(archive, dest, prefix=""):
+    """Unpacks the zip's files under prefix into dest, refusing any that would land outside it."""
+    root = os.path.normpath(dest)
+    with zipfile.ZipFile(archive) as z:
+        for info in z.infolist():
+            if not info.filename.startswith(prefix) or info.filename.endswith("/"):
+                continue
+            target = os.path.normpath(os.path.join(root, info.filename[len(prefix):]))
+            if not target.startswith(root + os.sep):
+                raise OSError("unsafe path in the download: " + info.filename)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with z.open(info) as src, open(target, "wb") as out:
+                shutil.copyfileobj(src, out)
+
+
 def decomp_commit(path):
     """The commit a downloaded decompilation came from (None for one chosen by hand)."""
     try:
@@ -362,6 +439,18 @@ class Launcher:
         ttk.Label(header, text="武士道", style="Kanji.TLabel").pack(side="right")
         tk.Frame(root, background=CRIMSON_DARK, height=2).pack(fill="x", padx=20)
 
+        # A newer version: shown once the check finds one.
+        self.update = None            # the newer release's manifest
+        self.update_state = None      # None, "downloading", "ready" (staged in update.new) or "failed"
+        self.update_wanted = False    # install as soon as it's staged and nothing is running
+        self.update_blocked = False   # the last install failed: don't install by itself again
+        self.banner = ttk.Frame(root, style="Banner.TFrame", padding=(12, 6))
+        self.banner_text = ttk.Label(self.banner, text="", style="Banner.TLabel")
+        self.banner_text.pack(side="left")
+        ttk.Button(self.banner, text="What's new", command=self.open_release_notes).pack(side="right")
+        self.update_button = ttk.Button(self.banner, text="Update now", command=self.update_now)
+        self.update_button.pack(side="right", padx=6)
+
         self.tabs = ttk.Notebook(root)
         self.tabs.pack(fill="both", expand=True, padx=12, pady=(8, 6))
         self.build_game_tab()
@@ -383,12 +472,14 @@ class Launcher:
         self.refresh_decomp()
         self.check_tools()
         self.update_buttons()
+        self.start_update_check()
         root.after(50, self.poll)
 
     # -- the launcher's own settings --
 
     def load_config(self):
-        config = {"disc": "", "decomp": "", "build_type": "Release", "build_first": True}
+        config = {"disc": "", "decomp": "", "build_type": "Release", "build_first": True, "auto_update": True,
+                  "built_version": ""}
         try:
             with open(LAUNCHER_JSON, encoding="utf-8") as f:
                 saved = json.load(f)
@@ -452,6 +543,12 @@ class Launcher:
                         variable=self.build_first_var,
                         command=lambda: self.set_config("build_first", self.build_first_var.get())
                         ).grid(row=7, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        if UPDATES:
+            self.auto_update_var = tk.BooleanVar(value=self.config["auto_update"])
+            ttk.Checkbutton(tab, text="Keep Dojo up to date (installs new versions from GitHub when it opens)",
+                            variable=self.auto_update_var,
+                            command=lambda: self.set_config("auto_update", self.auto_update_var.get())
+                            ).grid(row=8, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
     def set_config(self, key, value):
         self.config[key] = value
@@ -547,19 +644,9 @@ class Launcher:
                         out.write(chunk)
                         done += len(chunk)
                         self.events.put(("download-progress", done))
-                top = "bushido-%s/" % DECOMP_COMMIT
                 fresh = dest + ".new"
                 shutil.rmtree(fresh, ignore_errors=True)
-                with zipfile.ZipFile(part) as z:
-                    for info in z.infolist():
-                        if not info.filename.startswith(top) or info.filename.endswith("/"):
-                            continue
-                        target = os.path.normpath(os.path.join(fresh, info.filename[len(top):]))
-                        if not target.startswith(os.path.normpath(fresh) + os.sep):
-                            raise OSError("unsafe path in the download: " + info.filename)
-                        os.makedirs(os.path.dirname(target), exist_ok=True)
-                        with z.open(info) as src, open(target, "wb") as out:
-                            shutil.copyfileobj(src, out)
+                extract(part, fresh, "bushido-%s/" % DECOMP_COMMIT)
                 with open(os.path.join(fresh, DECOMP_STAMP), "w") as f:
                     f.write(DECOMP_COMMIT + "\n")
                 shutil.rmtree(dest, ignore_errors=True)
@@ -944,6 +1031,123 @@ class Launcher:
             for c, text in enumerate(row):
                 ttk.Label(tab, text=text, style="Section.TLabel" if r == 0 else "TLabel").grid(row=r, column=c, sticky="w", padx=(0, 32), pady=2)
 
+    # -- updates --
+
+    def start_update_check(self):
+        if not UPDATES:
+            return
+        shutil.rmtree(UPDATE_STAGE, ignore_errors=True)   # a staged update the script didn't get to
+        if os.path.isfile(UPDATE_FAILED):
+            # The last update couldn't put its files in place (a file in use?): offer it, don't force it again.
+            os.remove(UPDATE_FAILED)
+            self.update_blocked = True
+            self.status.configure(text="The last update couldn't be installed (see update.log); "
+                                  "Update now tries again.")
+
+        def work():
+            try:
+                with urllib.request.urlopen(UPDATE_MANIFEST, timeout=15) as response:
+                    manifest = json.loads(response.read().decode("utf-8"))
+                if version_key(manifest["version"]) > version_key(DOJO_VERSION):
+                    self.events.put(("update-found", manifest))
+            except Exception:   # offline, or no manifest yet: no update, and nothing to tell the player
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_banner(self, text):
+        self.banner_text.configure(text=text)
+        if not self.banner.winfo_ismapped():
+            self.banner.pack(fill="x", padx=20, pady=(8, 0), before=self.tabs)
+
+    def open_release_notes(self):
+        if self.update and self.update.get("notes"):
+            os.startfile(self.update["notes"])
+
+    def update_now(self):
+        self.update_wanted = True
+        if self.update_state in (None, "failed"):
+            self.download_update()
+        else:
+            self.maybe_install_update()
+
+    def download_update(self):
+        """Fetches the update (the whole release when the toolchain changed), checks it and unpacks it to
+        update.new."""
+        manifest = self.update
+        package = manifest["update"] if manifest.get("toolchain") == toolchain_version() else manifest["full"]
+        self.update_state = "downloading"
+        self.update_button.configure(state="disabled")
+        self.show_banner("Downloading Dojo %s..." % manifest["version"])
+
+        def work():
+            part = os.path.join(PORT_DIR, "update.zip.part")
+            try:
+                digest = hashlib.sha256()
+                with urllib.request.urlopen(package["url"], timeout=30) as response, open(part, "wb") as out:
+                    done = 0
+                    while True:
+                        chunk = response.read(1 << 18)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        digest.update(chunk)
+                        done += len(chunk)
+                        self.events.put(("update-progress", (done, package.get("size", 0))))
+                if digest.hexdigest() != package["sha256"]:
+                    raise OSError("the download is damaged (its SHA-256 doesn't match)")
+                shutil.rmtree(UPDATE_STAGE, ignore_errors=True)
+                extract(part, UPDATE_STAGE, package.get("prefix", ""))
+                if not os.path.isfile(os.path.join(UPDATE_STAGE, "Dojo.exe")):
+                    raise OSError("the download has no Dojo.exe in it")
+                self.events.put(("update-ready", None))
+            except Exception as e:   # network, disk or a bad archive: all reported the same way
+                shutil.rmtree(UPDATE_STAGE, ignore_errors=True)
+                self.events.put(("update-ready", str(e)))
+            finally:
+                if os.path.exists(part):
+                    os.remove(part)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def maybe_install_update(self):
+        """Installs a staged update the player wants once nothing is building or playing."""
+        if self.update_state != "ready" or not self.update_wanted:
+            return
+        if self.busy or self.game_running():
+            self.show_banner("Dojo %s is ready: it installs when the game closes." % self.update["version"])
+            return
+        self.show_banner("Installing Dojo %s: the launcher closes and opens again..." % self.update["version"])
+        self.root.after(1200, self.install_update)
+
+    def install_update(self, relaunch=True):
+        """Hands over to UPDATE_SCRIPT and closes; it opens the new launcher when it's done."""
+        if not getattr(sys, "frozen", False):
+            # A checkout run with DOJO_UPDATE_URL: everything up to here is tested, but the files aren't replaced.
+            self.status.configure(text="Update staged in %s (a checkout isn't updated in place)." % UPDATE_STAGE)
+            self.update_state = None
+            return
+        script = os.path.join(tempfile.gettempdir(), "dojo-update.cmd")
+        # PyInstaller's variables would make the new Dojo.exe look for the old one's (deleted) unpacked files.
+        env = {k: v for k, v in os.environ.items()
+               if not k.upper().startswith(("_PYI", "_MEI")) and k.upper() not in ("TCL_LIBRARY", "TK_LIBRARY")}
+        env.update(DOJO_PIDS="%d %d" % (os.getpid(), os.getppid()), DOJO_STAGE=UPDATE_STAGE, DOJO_HOME=PORT_DIR,
+                   DOJO_RELAUNCH="1" if relaunch else "0", PYINSTALLER_RESET_ENVIRONMENT="1")
+        try:
+            with open(script, "w", encoding="ascii", newline="\r\n") as f:
+                f.write(UPDATE_SCRIPT)
+            with open(UPDATE_LOG, "w", encoding="utf-8") as log:
+                subprocess.Popen(["cmd.exe", "/d", "/c", script], cwd=tempfile.gettempdir(), env=env,
+                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, close_fds=True,
+                                 creationflags=NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP)
+        except OSError as e:
+            self.update_state = "failed"
+            self.show_banner("Couldn't install the update: %s" % e)
+            self.update_button.configure(state="normal")
+            return
+        self.update_state = "installing"
+        self.close()
+
     # -- playing --
 
     def game_running(self):
@@ -960,7 +1164,8 @@ class Launcher:
         if chosen == os.path.normcase(DECOMP_DIR) and decomp_commit(DECOMP_DIR) != DECOMP_COMMIT:
             self.download_decomp(then_play=True)
             return
-        if self.build_first_var.get() or not os.path.isfile(EXE):
+        # An updated launcher rebuilds the game once, from its version's source, whatever the checkbox says.
+        if self.build_first_var.get() or not os.path.isfile(EXE) or self.config["built_version"] != DOJO_VERSION:
             if self.decomp_ok() and toolchain_version():
                 self.build(then_play=True)
                 return
@@ -1013,8 +1218,12 @@ class Launcher:
                     self.write_log("\n" + text + "\n", "good" if ok else "error")
                     self.status.configure(text=text)
                     self.update_buttons()
+                    if ok and os.path.isfile(EXE):
+                        self.set_config("built_version", DOJO_VERSION)
                     if ok and then_play:
                         self.launch()
+                    else:
+                        self.maybe_install_update()
                 elif kind == "download-progress":
                     text = "Downloading the game's source... %.1f MB" % (value / 1e6)
                     self.decomp_info.configure(text=text, style="TLabel")
@@ -1063,6 +1272,26 @@ class Launcher:
                         self.write_log("\n--- the game's last output ---\n" + "".join(tail), "error")
                         self.tabs.select(2)
                     self.update_buttons()
+                    self.maybe_install_update()
+                elif kind == "update-found":
+                    self.update = value
+                    self.show_banner("Dojo %s is out (you have %s)." % (value["version"], DOJO_VERSION))
+                    if self.config["auto_update"] and not self.update_blocked:
+                        self.update_now()
+                elif kind == "update-progress":
+                    done, total = value
+                    self.show_banner("Downloading Dojo %s... %.1f%s MB" % (
+                        self.update["version"], done / 1e6, " of %.1f" % (total / 1e6) if total else ""))
+                elif kind == "update-ready":
+                    if value:
+                        self.update_state = "failed"
+                        self.update_button.configure(state="normal", text="Try again")
+                        self.show_banner("Couldn't download Dojo %s: %s" % (self.update["version"], value))
+                    else:
+                        self.update_state = "ready"
+                        self.update_button.configure(state="normal", text="Install now")
+                        self.show_banner("Dojo %s is downloaded." % self.update["version"])
+                        self.maybe_install_update()
         except queue.Empty:
             pass
         self.root.after(50, self.poll)
@@ -1084,6 +1313,10 @@ class Launcher:
     def close(self):
         self.save_settings()
         self.save_config()
+        if self.update_state == "ready" and not self.game_running():
+            self.install_update(relaunch=False)   # downloaded but not installed yet: installed on the way out
+            if self.update_state == "installing":
+                return   # install_update closed the window
         self.root.destroy()
 
 

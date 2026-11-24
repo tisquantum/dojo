@@ -31,3 +31,8 @@ toolchain/
 decomp/
 decomp.new/
 dist/
+
+# The launcher's self-update (launcher.pyw).
+update.new/
+update.failed
+update.zip.part
