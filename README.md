@@ -102,9 +102,11 @@ controller's sound device, which Windows shows as "DualSense Wireless Controller
 DualSense haptics off, it gets SDL's motor rumble.
 
 The launcher's Controls tab has the same settings: click a cell, then press the key, mouse button or gamepad
-button (right-click clears it); *Test rumble* shakes a player's gamepad. It asks the built game for what it
-can't see itself: `dojo.exe --pads` lists the gamepads, `--capture-pad` waits for a press on one and
-`--test-rumble 1|2` rumbles a player's.
+button (right-click clears it); *Test rumble* shakes a player's gamepad. The launcher reads the gamepads itself,
+through a 64-bit SDL3.dll packaged into Dojo.exe (`tools/make_release.py` puts it in
+`dist/_pyinstaller/sdl64`, where a checkout's launcher looks too), so this works before the game is built. Once
+it is, *Test rumble* runs `dojo.exe --test-rumble 1|2`, which rumbles the way the game does, a wired DualSense's
+haptics included (`--pads` and `--capture-pad` are the game's other helpers).
 
 ### Settings
 

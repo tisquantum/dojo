@@ -26,7 +26,7 @@ import zipfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-DOJO_VERSION = "0.1.3"
+DOJO_VERSION = "0.1.4"
 
 # The folder of Dojo.exe in a release, of this file in a checkout.
 PORT_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
@@ -349,6 +349,113 @@ DEFAULT_BINDS = [[PAD | 0, 0, KEY | 27, 0], [PAD | 1, 0, KEY | 6, 0], [PAD | 2, 
                  [AXIS | 8, 0, KEY | 30, 0], [AXIS | 10, 0, KEY | 32, 0], [PAD | 6, 0, KEY | 40, 0],
                  [PAD | 4, 0, KEY | 42, 0], [PAD | 11, 0, KEY | 82, 0], [PAD | 12, 0, KEY | 81, 0],
                  [PAD | 13, 0, KEY | 80, 0], [PAD | 14, 0, KEY | 79, 0]]
+
+
+class Gamepads:
+    """The gamepads, seen by the launcher itself through a 64-bit SDL3.dll packaged inside Dojo.exe (in a checkout,
+    the one tools/make_release.py unpacked into dist/_pyinstaller/sdl64): the same SDL the game uses, so the same
+    IDs, kinds and button numbers. Kept open only while the Controls tab is showing and the game isn't running."""
+
+    INIT_GAMEPAD = 0x2000
+    WIRED = 1
+    BUTTONS = 26   # SDL_GAMEPAD_BUTTON_COUNT
+    GUIDE = 5
+
+    def __init__(self):
+        self.sdl = None
+        self.open = {}   # SDL_JoystickID: SDL_Gamepad *
+        path = os.path.join(getattr(sys, "_MEIPASS", ""), "SDL3.dll") if getattr(sys, "frozen", False) else \
+            os.path.join(PORT_DIR, "dist", "_pyinstaller", "sdl64", "SDL3.dll")
+        try:
+            import ctypes
+            sdl = ctypes.CDLL(path)
+        except OSError:
+            return
+        c = ctypes
+
+        class GUID(c.Structure):
+            _fields_ = [("data", c.c_uint8 * 16)]
+
+        for name, res, args in [
+                ("SDL_SetHint", c.c_bool, [c.c_char_p, c.c_char_p]), ("SDL_Init", c.c_bool, [c.c_uint32]),
+                ("SDL_GetGamepads", c.POINTER(c.c_uint32), [c.POINTER(c.c_int)]), ("SDL_free", None, [c.c_void_p]),
+                ("SDL_GetGamepadNameForID", c.c_char_p, [c.c_uint32]),
+                ("SDL_GetGamepadGUIDForID", GUID, [c.c_uint32]),
+                ("SDL_GUIDToString", None, [GUID, c.c_char_p, c.c_int]),
+                ("SDL_GetGamepadTypeForID", c.c_int, [c.c_uint32]),
+                ("SDL_GetGamepadStringForType", c.c_char_p, [c.c_int]),
+                ("SDL_OpenGamepad", c.c_void_p, [c.c_uint32]), ("SDL_CloseGamepad", None, [c.c_void_p]),
+                ("SDL_GetGamepadConnectionState", c.c_int, [c.c_void_p]), ("SDL_UpdateGamepads", None, []),
+                ("SDL_PumpEvents", None, []),
+                ("SDL_GetGamepadButton", c.c_bool, [c.c_void_p, c.c_int]),
+                ("SDL_GetGamepadAxis", c.c_int16, [c.c_void_p, c.c_int]),
+                ("SDL_RumbleGamepad", c.c_bool, [c.c_void_p, c.c_uint16, c.c_uint16, c.c_uint32])]:
+            f = getattr(sdl, name)
+            f.restype, f.argtypes = res, args
+        sdl.SDL_SetHint(b"SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", b"1")
+        if sdl.SDL_Init(self.INIT_GAMEPAD):
+            self.sdl, self.c = sdl, c
+
+    def available(self):
+        return self.sdl is not None
+
+    def list(self):
+        """The connected gamepads, as dojo.exe --pads lists them: (guid, kind, wired, name)."""
+        if not self.sdl:
+            return []
+        c, sdl = self.c, self.sdl
+        sdl.SDL_PumpEvents()
+        count = c.c_int(0)
+        ids = sdl.SDL_GetGamepads(c.byref(count))
+        found = [ids[i] for i in range(count.value)] if ids else []
+        if ids:
+            sdl.SDL_free(ids)
+        for gone in [i for i in self.open if i not in found]:
+            sdl.SDL_CloseGamepad(self.open.pop(gone))
+        pads, self.order = [], []
+        for i in found:
+            if i not in self.open:
+                pad = sdl.SDL_OpenGamepad(i)
+                if not pad:
+                    continue
+                self.open[i] = pad
+            text = c.create_string_buffer(40)
+            sdl.SDL_GUIDToString(sdl.SDL_GetGamepadGUIDForID(i), text, 40)
+            kind = sdl.SDL_GetGamepadStringForType(sdl.SDL_GetGamepadTypeForID(i)) or b"standard"
+            self.order.append(i)
+            pads.append((text.value.decode(), kind.decode(),
+                         sdl.SDL_GetGamepadConnectionState(self.open[i]) == self.WIRED,
+                         (sdl.SDL_GetGamepadNameForID(i) or b"Gamepad").decode("utf-8", "replace")))
+        return pads
+
+    def close(self):
+        for pad in self.open.values():
+            self.sdl.SDL_CloseGamepad(pad)
+        self.open = {}
+
+    def state(self):
+        """Every open gamepad's buttons and axes, for spotting a press."""
+        self.sdl.SDL_UpdateGamepads()
+        return {i: ([self.sdl.SDL_GetGamepadButton(p, b) for b in range(self.BUTTONS)],
+                    [self.sdl.SDL_GetGamepadAxis(p, a) for a in range(6)]) for i, p in self.open.items()}
+
+    @classmethod
+    def pressed(cls, before, now):
+        """A binding (input.h) for what went down between two states, or 0."""
+        for i, (buttons, axes) in now.items():
+            old_buttons, old_axes = before.get(i, ([False] * cls.BUTTONS, [0] * 6))
+            for b, down in enumerate(buttons):
+                if down and not old_buttons[b] and b != cls.GUIDE:
+                    return PAD | b
+            for a, value in enumerate(axes):
+                if abs(value) > 24000 and abs(old_axes[a]) < 12000 and (a < 4 or value > 0):
+                    return AXIS | (a << 1) | (value < 0)
+        return 0
+
+    def rumble(self, index, seconds):
+        """Rumbles the gamepad at this place in the last list()."""
+        pad = self.open.get(self.order[index]) if 0 <= index < len(getattr(self, "order", [])) else None
+        return bool(pad) and self.sdl.SDL_RumbleGamepad(pad, 0xFFFF, 0xC000, int(seconds * 1000))
 
 
 def scancode_for(event):
@@ -1150,8 +1257,8 @@ class Launcher:
     # -- Controls tab --
     # The same settings as the game's controls page (F1, Controls; port/src/input.c): each player's gamepad, the
     # keyboard's player, the stick, rumble, and two gamepad and two keyboard-and-mouse bindings for each button.
-    # The gamepads are the game's to see: dojo.exe --pads lists them, --capture-pad waits for a press on one and
-    # --test-rumble shakes a player's.
+    # The launcher sees the gamepads itself (Gamepads); a game built by this version also tests rumble the game's
+    # way (dojo.exe --test-rumble, which knows a DualSense's haptics).
 
     def build_controls_tab(self):
         outer = ttk.Frame(self.tabs, padding=(16, 12, 4, 12))
@@ -1250,9 +1357,12 @@ class Launcher:
                   style="Sub.TLabel", wraplength=640).grid(row=4, column=0, sticky="w", pady=(12, 0))
 
         tab.bind_all("<KeyPress>", self.key_pressed, add="+")
+        self.gamepads = Gamepads()
+        self.controls_tab = outer
         self.refresh_pads()
         self.refresh_cells()
         self.find_pads()
+        self.root.after(1500, self.watch_pads)
 
     def combo_var(self, parent, row, key, names, choices, values, column=1):
         var = tk.StringVar()
@@ -1317,9 +1427,13 @@ class Launcher:
         self.refresh_pads()
         self.refresh_cells()
 
+    def game_built(self):
+        """dojo.exe is there and is this version's (an older one doesn't know the helper commands)."""
+        return os.path.isfile(EXE) and self.config.get("built_version") == DOJO_VERSION
+
     def run_helper(self, args, done):
         """Runs dojo.exe with a helper command in a thread; done(output or None) back on this thread."""
-        if not os.path.isfile(EXE):
+        if not self.game_built():
             done(None)
             return
 
@@ -1333,31 +1447,74 @@ class Launcher:
 
         threading.Thread(target=work, daemon=True).start()
 
-    def find_pads(self):
-        def done(out):
-            if out is None:
-                self.pad_note.configure(text="Build the game first: it finds the gamepads." if not os.path.isfile(EXE)
-                                        else "Couldn't ask the game for the gamepads.")
-                return
-            self.pads = []
-            for line in out.splitlines():
-                parts = line.split(" ", 4)
-                if parts[0] == "pad" and len(parts) == 5:
-                    self.pads.append((parts[1], parts[2], parts[3] == "1", parts[4]))
-            self.pad_note.configure(text="%d gamepad%s connected." % (len(self.pads), "" if len(self.pads) == 1
-                                                                      else "s") if self.pads
-                                    else "No gamepads connected.")
+    def show_pads(self, pads):
+        if pads != self.pads:
+            self.pads = pads
             self.refresh_pads()
             self.refresh_cells()
+        self.pad_note.configure(text="%d gamepad%s connected." % (len(pads), "" if len(pads) == 1 else "s")
+                                if pads else "No gamepads connected.")
+
+    def find_pads(self):
+        if self.gamepads.available():
+            if not self.game_running():
+                self.show_pads(self.gamepads.list())
+            return
+
+        def done(out):
+            if out is None:
+                self.pad_note.configure(text="Can't see gamepads until the game is built (press Play once).")
+                return
+            self.show_pads([(p[1], p[2], p[3] == "1", p[4]) for p in (line.split(" ", 4) for line in out.splitlines())
+                            if p[0] == "pad" and len(p) == 5])
 
         self.pad_note.configure(text="Looking for gamepads...")
         self.run_helper(["--pads"], done)
+
+    def watch_pads(self):
+        """While the Controls tab shows, gamepads plugged in or out appear at once; otherwise, or while the game
+        runs (it has them), the launcher lets go of them."""
+        if self.gamepads.available():
+            if self.tabs.select() == str(self.controls_tab) and not self.game_running():
+                if self.capturing is None or self.capturing[1] >= 2:
+                    self.show_pads(self.gamepads.list())
+            elif self.gamepads.open:
+                self.gamepads.close()
+        self.root.after(1000, self.watch_pads)
+
+    def player_pad(self, player):
+        """The index in self.pads of the gamepad a player gets, chosen as the game chooses (input.c)."""
+        taken, chosen = set(), [None, None]
+        for p in range(2):
+            want = self.controls["pad%d" % (p + 1)].lower()
+            if want not in ("auto", "none"):
+                chosen[p] = next((i for i, pad in enumerate(self.pads) if pad[0].lower() == want and i not in taken),
+                                 None)
+                taken.add(chosen[p])
+        for p in range(2):
+            if self.controls["pad%d" % (p + 1)] == "auto":
+                chosen[p] = next((i for i in range(len(self.pads)) if i not in taken), None)
+                taken.add(chosen[p])
+        return chosen[player]
 
     def test_rumble(self, player):
         if self.game_running():
             self.rumble_note.configure(text="The game is running: close it to test here.")
             return
         self.save_settings()
+        index = self.player_pad(player)
+        if index is None:
+            self.rumble_note.configure(text="Player %d has no gamepad." % (player + 1))
+            return
+        if not self.game_built():
+            # The launcher's own rumble: the motors (a DualSense's emulated ones), not its haptics.
+            ok = self.gamepads.available() and self.gamepads.rumble(index, 0.6)
+            self.rumble_note.configure(text="Player %d: that was the gamepad's rumble.%s" % (
+                player + 1, " The game uses a wired DualSense's haptics: build it (Play) to test those here."
+                if self.pads[index][1] == "ps5" and self.pads[index][2] else "")
+                if ok else "Couldn't rumble player %d's gamepad." % (player + 1))
+            return
+        self.gamepads.close()   # the game's helper takes the gamepad for a moment
 
         def done(out):
             out = (out or "").strip()
@@ -1365,7 +1522,7 @@ class Launcher:
                 "haptics": "Player %d: that was the DualSense's haptics." % (player + 1),
                 "rumble": "Player %d: that was the gamepad's rumble." % (player + 1),
                 "no gamepad": "Player %d has no gamepad." % (player + 1),
-            }.get(out, "Build the game first." if not os.path.isfile(EXE) else "Couldn't test the rumble."))
+            }.get(out, "Couldn't test the rumble."))
 
         self.rumble_note.configure(text="Rumbling player %d's gamepad..." % (player + 1))
         self.run_helper(["--test-rumble", str(player + 1)], done)
@@ -1403,6 +1560,10 @@ class Launcher:
             self.refresh_cells()
             self.rumble_note.configure(text="The game is running: change gamepad bindings in it (F1, Controls).")
             return
+        if self.gamepads.available():
+            self.gamepads.list()
+            self.watch_capture(button, slot, self.gamepads.state(), 0)
+            return
 
         def done(out):
             if self.capturing != (button, slot):
@@ -1417,6 +1578,20 @@ class Launcher:
                     self.rumble_note.configure(text="Build the game first: it reads the gamepad.")
 
         self.run_helper(["--capture-pad"], done)
+
+    def watch_capture(self, button, slot, before, ticks):
+        """Waits, ten seconds at most, for a gamepad press to bind."""
+        if self.capturing != (button, slot):
+            return
+        now = self.gamepads.state()
+        binding = Gamepads.pressed(before, now)
+        if binding:
+            self.set_binding(button, slot, binding)
+        elif ticks > 600:
+            self.capturing = None
+            self.refresh_cells()
+        else:
+            self.root.after(16, lambda: self.watch_capture(button, slot, now, ticks + 1))
 
     def mouse_pressed(self, event):
         self.root.unbind_all("<ButtonPress>")
@@ -1587,6 +1762,7 @@ class Launcher:
 
     def launch(self):
         self.save_settings()
+        self.gamepads.close()   # the game's now
         if not os.path.isdir(SAVES):
             # Saves made before the launcher, beside the decompilation, come along (copied, not moved).
             old = os.path.join(self.decomp_var.get().strip().strip('"'), "saves")

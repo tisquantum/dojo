@@ -44,7 +44,7 @@ built with, unmodified except that parts the build doesn't use were left out. Ea
 | `toolchain/deps/glslang` | glslang | BSD and others (`LICENSE.txt`) |
 
 `Dojo.exe` is the launcher packaged with PyInstaller, which includes Python and Tcl/Tk (PSF and BSD-style
-licences).
+licences) and a 64-bit SDL 3 (zlib), which it reads gamepads with.
 
 `decomp` is the decompiled source of Bushido Blade with Dojo's changes (github.com/tisquantum/bushido, branch
 `dojo`, a fork of github.com/virtualonno/bushido). It isn't covered by Dojo's MIT licence.
@@ -60,6 +60,33 @@ def launcher_constant(name):
 
 def version():
     return launcher_constant("DOJO_VERSION")
+
+
+def launcher_sdl():
+    """A 64-bit SDL3.dll for Dojo.exe (the launcher sees gamepads through it): from the SDL release the toolchain
+    pins, whose 32-bit half the game is built with. Unpacked to dist/_pyinstaller/sdl64, where a checkout's
+    launcher finds it too."""
+    sys.path.insert(0, os.path.join(HERE, "tools"))
+    from fetch_toolchain import PACKAGES
+    name, url, sha256 = next(p[:3] for p in PACKAGES if p[0] == "SDL3")
+    folder = os.path.join(DIST, "_pyinstaller", "sdl64")
+    dll = os.path.join(folder, "SDL3.dll")
+    if os.path.isfile(dll):
+        return dll
+    os.makedirs(folder, exist_ok=True)
+    archive = os.path.join(folder, os.path.basename(url))
+    print("downloading", url, flush=True)
+    with urllib.request.urlopen(url) as response:
+        data = response.read()
+    if hashlib.sha256(data).hexdigest() != sha256:
+        raise SystemExit("%s: wrong SHA-256" % url)
+    with open(archive, "wb") as f:
+        f.write(data)
+    with zipfile.ZipFile(archive) as z:
+        entry = next(n for n in z.namelist() if n.endswith("x86_64-w64-mingw32/bin/SDL3.dll"))
+        with z.open(entry) as src, open(dll, "wb") as out:
+            shutil.copyfileobj(src, out)
+    return dll
 
 
 def add_decomp(dest):
@@ -106,6 +133,7 @@ def main():
     work = os.path.join(DIST, "_pyinstaller")
     subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--onefile", "--windowed", "--name", "Dojo",
                     "--distpath", stage, "--workpath", work, "--specpath", work,
+                    "--add-binary", launcher_sdl() + os.pathsep + ".",
                     os.path.join(HERE, "launcher.pyw")], check=True)
 
     print("copying the source", flush=True)
