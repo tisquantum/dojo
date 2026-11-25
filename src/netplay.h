@@ -29,6 +29,8 @@ typedef struct NetplayTransport {
 void NetplayBegin(const NetplayTransport *transport, int local, int delay);
 void NetplayEnd(void);
 int NetplayLocalPlayer(void);
+/* The most fields a rollback ran again in the last second (60 fields), for the match's banner. */
+int NetplayRecentRollback(void);
 /* A controller's buttons as an online match lets the game see them: no Start in a fight, whose pause would
  * stop both players' games (and, held with the rest, quit them). Applied to both players' inputs where the
  * simulation reads them, players' and spectators' alike, so every machine filters the same. */

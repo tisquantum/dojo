@@ -95,6 +95,7 @@ static struct {
     uint32_t peerSentMs, peerSentAt;
     uint32_t rttMs;
     unsigned rollbacks, rolledFields, stalls;
+    uint32_t recentRollback, recentRollbackField; /* the deepest rollback in the last second, and when */
     char desync[96];
     char status[160];
     int lossPercent, lagMs;  /* DOJO_NET_LOSS, DOJO_NET_LAG: a bad network, for testing */
@@ -622,6 +623,10 @@ int NetplayRunField(unsigned localButtons)
         SpuRestoreAfterRollback((long)N.rollbackFrom, (long)N.field);
         N.rollbacks++;
         N.rolledFields += N.field - N.rollbackFrom;
+        if (N.field - N.rollbackFrom >= N.recentRollback || N.field - N.recentRollbackField > 60) {
+            N.recentRollback = N.field - N.rollbackFrom;
+            N.recentRollbackField = N.field;
+        }
         N.rollbackFrom = UINT32_MAX;
     }
 
@@ -644,6 +649,14 @@ int NetplayRunField(unsigned localButtons)
              N.local + 1, N.delay, N.rttMs, N.rollbacks, N.rolledFields, SpuRestoredSounds(), N.stalls,
              N.desync[0] ? " | " : "", N.desync);
     return advanced;
+}
+
+int NetplayRecentRollback(void)
+{
+    if (!N.active || N.field - N.recentRollbackField > 60) {
+        return 0;
+    }
+    return (int)N.recentRollback;
 }
 
 const char *NetplayStatus(void)

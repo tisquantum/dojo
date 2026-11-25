@@ -786,8 +786,12 @@ int main(int argc, char **argv)
         const char *fps = SDL_getenv("DOJO_FPS");
         const char *scale = SDL_getenv("DOJO_SCALE");
         const char *which = SDL_getenv("DOJO_RENDERER");
+        const char *quickPing = SDL_getenv("DOJO_QUICK_MAX_PING");
         if (fps) {
             g_settings.fps = atoi(fps) > 0 ? atoi(fps) : 30;
+        }
+        if (quickPing) {
+            g_settings.quickMaxPing = atoi(quickPing);
         }
         if (scale) {
             g_settings.scale = atoi(scale) < 1 ? 1 : (atoi(scale) > 8 ? 8 : atoi(scale));

@@ -23,6 +23,8 @@ Player -> server                          Server -> player
   RESULT <match id> <winning side>          MATCH <match id> <side> <peer ip> <peer port> <peer name>
   LEAVE                                     PEERLEFT <match id>
   BYE                                       SPECTATE <match id> <king> <challenger>
+  DECLINE <match id> <ms>                   DECLINED <match id> <ms>   (quick play: too far apart; both
+                                            are queued again, and not paired with each other for a while)
   WATCH <match id> <field>                  SPECEND <match id> <fields>
   (BBSP packets)                            SPACK <match id> <fields>, (BBSP packets)
 
@@ -84,6 +86,7 @@ class Matchmaker(asyncio.DatagramProtocol):
         self.matches = {}
         self.ended = {}         # match id -> Match, finished but still watchable
         self.next_id = random.randint(1, 1 << 20)
+        self.apart = {}         # frozenset of two addresses -> until when quick play keeps them apart
 
     # -- plumbing ------------------------------------------------------------------------------------------
 
@@ -208,17 +211,46 @@ class Matchmaker(asyncio.DatagramProtocol):
     def cmd_leave(self, client, args):
         self.leave(client)
 
+    def kept_apart(self, a, b):
+        until = self.apart.get(frozenset((a.addr, b.addr)))
+        return until is not None and until > time.monotonic()
+
     def cmd_quick(self, client, args):
         self.leave(client)
-        partner = next((c for c in self.quick if c.disc == client.disc), None)
+        self.queue_quick(client)
+
+    def queue_quick(self, client, front=False):
+        partner = next((c for c in self.quick if c.disc == client.disc and not self.kept_apart(c, client)), None)
         if partner:
             self.quick.remove(partner)
             partner.where = None
             self.start_match([partner, client], 'quick')
             return
         client.where = 'quick'
-        self.quick.append(client)
+        if front:
+            self.quick.insert(0, client)
+        else:
+            self.quick.append(client)
         self.send(client, 'QUEUED %d' % len(self.clients))
+
+    def cmd_decline(self, client, args):
+        """A quick match one of the two found too far apart: both go back to the front of the queue, kept
+        apart from each other for ten minutes."""
+        try:
+            match = self.matches.get(int(args[0]))
+            ms = int(args[1]) if len(args) > 1 else 0
+        except (ValueError, IndexError):
+            return
+        if match is None or match.mode != 'quick' or client not in match.players:
+            return
+        a, b = match.players
+        self.apart[frozenset((a.addr, b.addr))] = time.monotonic() + 600
+        self.end_match(match, None)
+        for player in (a, b):
+            self.send(player, 'DECLINED %d %d' % (match.id, ms))
+        for player in (b, a):
+            self.queue_quick(player, front=True)
+        print('match %d declined at %d ms' % (match.id, ms), flush=True)
 
     def cmd_create(self, client, args):
         self.leave(client)

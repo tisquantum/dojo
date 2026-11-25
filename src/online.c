@@ -39,6 +39,8 @@
 #define FIELD_MS        16.683 /* a console field, the unit of input delay */
 #define DELAY_FALLBACK  2      /* the input delay when the round trip couldn't be measured */
 #define DELAY_DECIDE_MS 4000   /* setup decides its input delay by then, measured or not */
+#define QUICK_PICKY_MS  30000  /* quick play turns down distant opponents for this long in the queue */
+#define DECLINE_WAIT_MS 3000   /* a server that doesn't answer a decline: leave and queue again */
 /* Raised whenever a change makes the same inputs play out differently (the game's code, not its data, so the
  * starting state's hash alone can't tell): mixed into that hash, it turns away a player on another version.
  * 2: rain and foliage across the widescreen margin (0.1.5). 3: no pausing in a fight (0.1.6). 4: the controllers sampled before
@@ -96,6 +98,8 @@ static struct {
     int haveHello, sentReady, peerReady;
     int peerTicks, peerDelay;
     int ownDelay;          /* the input delay this machine asks for, -1 until decided; then it stays */
+    uint32_t queuedMs;     /* when quick play started looking */
+    uint32_t declinedMs;   /* when this machine turned the match down for its distance, or 0 */
     uint32_t rttMs;        /* the shortest round trip measured on the path in use */
     int rttSamples;
     int rttDirect;         /* whether the samples are the direct path's */
@@ -572,6 +576,7 @@ void OnlineQuickPlay(void)
     }
     O.mode = ONLINE_QUICK;
     O.state = ONLINE_WAITING;
+    O.queuedMs = NowMs();
     snprintf(O.waitText, sizeof(O.waitText), "Looking for an opponent...");
     SendServer("QUICK");
 }
@@ -673,6 +678,7 @@ static void BeginSetupAddress(uint32_t matchId, int role, const struct sockaddr_
     O.direct = 0;
     O.haveHello = O.sentReady = O.peerReady = 0;
     O.ownDelay = -1;
+    O.declinedMs = 0;
     O.rttMs = 0;
     O.rttSamples = O.rttDirect = 0;
     O.setupStartMs = NowMs();
@@ -774,6 +780,16 @@ static void ServerLine(char *line)
         unsigned long id, have;
         if (sscanf(line, "%lu %lu", &id, &have) == 2 && (uint32_t)id == O.matchId && (uint32_t)have > O.pushAcked) {
             O.pushAcked = (uint32_t)have;
+        }
+    } else if (strcmp(word, "DECLINED") == 0) {
+        /* DECLINED <match id> <ms>: one of the two turned it down for the distance; both are queued again */
+        unsigned long id = 0, ms = 0;
+        sscanf(line, "%lu %lu", &id, &ms);
+        if ((uint32_t)id == O.matchId && O.state == ONLINE_SETUP) {
+            O.matchId = 0;
+            O.state = ONLINE_WAITING;
+            snprintf(O.waitText, sizeof(O.waitText), "%s was too far away (%lu ms). Looking for another opponent...",
+                     O.peerName, ms);
         }
     } else if (strcmp(word, "PEERLEFT") == 0) {
         unsigned long id = 0;
@@ -942,9 +958,42 @@ static void DecideDelay(uint32_t now)
             (unsigned)O.rttMs, O.rttSamples);
 }
 
+/* Quick play: an opponent further than the limit is turned down, while the player has waited less than
+ * QUICK_PICKY_MS (after that, anyone). The server queues both again, apart (DECLINE); a server that doesn't
+ * know it gets a plain leave and a new place in the queue. */
+static int DeclineIfFar(uint32_t now)
+{
+    int settled = O.direct || now - O.setupStartMs >= RELAY_AFTER_MS;
+    if (O.mode != ONLINE_QUICK || O.serverless) {
+        return 0;
+    }
+    if (O.declinedMs) {
+        if (now - O.declinedMs >= DECLINE_WAIT_MS) {
+            SendServer("LEAVE");
+            O.matchId = 0;
+            O.state = ONLINE_IDLE;
+            OnlineQuickPlay();
+            O.queuedMs = now - QUICK_PICKY_MS / 2; /* still a little picky, then anyone */
+        }
+        return 1;
+    }
+    if (!g_settings.quickMaxPing || !settled || O.rttSamples < 3 || (int)O.rttMs <= g_settings.quickMaxPing ||
+        now - O.queuedMs >= QUICK_PICKY_MS || O.sentReady) {
+        return 0;
+    }
+    fprintf(stderr, "online: turning down %s at %u ms (limit %d)\n", O.peerName, (unsigned)O.rttMs,
+            g_settings.quickMaxPing);
+    SendServer("DECLINE %lu %u", (unsigned long)O.matchId, (unsigned)O.rttMs);
+    O.declinedMs = now ? now : 1;
+    return 1;
+}
+
 static void UpdateSetup(void)
 {
     uint32_t now = NowMs();
+    if (DeclineIfFar(now)) {
+        return;
+    }
     DecideDelay(now);
     if (now - O.lastPunchMs >= PUNCH_MS) {
         O.lastPunchMs = now;
@@ -1287,6 +1336,9 @@ void OnlineDescribe(char *out, int size)
     case ONLINE_SETUP:
         if (O.serverless && O.role == 1) {
             snprintf(out, (size_t)size, "Connecting to the host...");
+        } else if (O.rttSamples > 0) {
+            snprintf(out, (size_t)size, "Opponent found: %s, %u ms (%s). Connecting...", O.peerName,
+                     (unsigned)O.rttMs, O.direct ? "direct" : "through the server");
         } else {
             snprintf(out, (size_t)size, "Opponent found: %s. Connecting...", O.peerName);
         }
@@ -1318,10 +1370,18 @@ void OnlineBanner(char *out, int size)
                 rtt = (unsigned)atoi(r + 4);
             }
         }
-        if (O.mode == ONLINE_KOTH) {
-            snprintf(out, (size_t)size, "vs %s   %u ms   delay %d   King of the Hill", O.peerName, rtt, O.delay);
-        } else {
-            snprintf(out, (size_t)size, "vs %s   %u ms   delay %d", O.peerName, rtt, O.delay);
+        {
+            /* the connection: its round trip, how, the input delay, and the deepest rollback lately */
+            int rollback = NetplayRecentRollback();
+            char connection[96];
+            snprintf(connection, sizeof(connection), "%u ms %s   delay %d   rollback %s%d", rtt,
+                     O.direct || O.serverless ? "direct" : "relayed", O.delay,
+                     rollback >= 6 ? "!" : "", rollback);
+            if (O.mode == ONLINE_KOTH) {
+                snprintf(out, (size_t)size, "vs %s   %s   King of the Hill", O.peerName, connection);
+            } else {
+                snprintf(out, (size_t)size, "vs %s   %s", O.peerName, connection);
+            }
         }
     } else if (O.state == ONLINE_WAITING || O.state == ONLINE_SETUP) {
         OnlineDescribe(out, size);

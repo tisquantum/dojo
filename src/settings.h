@@ -30,6 +30,7 @@ typedef struct Settings {
     int watch;      /* King of the Hill: watch the match while waiting in line */
     int offline;    /* never contact the matchmaking server (direct player-to-player matches still work) */
     int onlineDelay; /* online input delay in fields: -1 picks the least the connection allows */
+    int quickMaxPing; /* quick play turns down an opponent further than this (ms, 0: any) for its first 30 s */
 } Settings;
 
 #define SETTINGS_ASPECT_COUNT 7
