@@ -263,6 +263,7 @@ DEFAULTS = {
     "fps": 0, "scale": 4, "software": 0, "fullscreen": 0, "vsync": 0, "volume": 100, "show_fps": 0,
     "analog_stick": 0, "p2p_port": 7778, "watch_hill": 1, "offline": 0, "stick_deadzone": 50, "rumble": 100,
     "dualsense_haptics": 1, "keyboard_player": 1, "online_delay": -1, "quick_max_ping": 160,
+    "online_first_to": 0,
 }
 
 
@@ -1024,12 +1025,15 @@ class Launcher:
         combo(12, 2, "Quick play ping", "quick_max_ping",
               ["Anyone"] + ["Up to %d ms (anyone after 30 s)" % v for v in (80, 120, 160, 200, 250, 300)],
               [0, 80, 120, 160, 200, 250, 300])
+        combo(13, 2, "Online set", "online_first_to",
+              ["No end (until someone leaves)", "First to 1", "First to 2", "First to 3", "First to 5"],
+              [0, 1, 2, 3, 5])
 
         ttk.Label(tab, text="These are saved to dojo.ini beside the game. The in-game options menu (F1) "
                   "changes the same settings.", style="Sub.TLabel", wraplength=640).grid(
-            row=13, column=0, columnspan=4, sticky="w", pady=(18, 0))
+            row=14, column=0, columnspan=4, sticky="w", pady=(18, 0))
         ttk.Button(tab, text="Reset to defaults", command=self.reset_settings).grid(
-            row=14, column=0, sticky="w", pady=(8, 0))
+            row=15, column=0, sticky="w", pady=(8, 0))
 
     def build_server_row(self, tab, row, col, value):
         """The matchmaking server: the official one, locked, unless the player confirms they want another."""

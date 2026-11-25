@@ -133,6 +133,8 @@ The launcher's Settings tab and the in-game options menu (**F1**) change the sam
 | `server` | `host:port` | The matchmaking server. The official one is `dojo-matchmaker.fly.dev:7777`. |
 | `offline` | 0 / 1 | 1: never contact the server (direct matches still work). |
 | `p2p_port` | UDP port, default 7778 | The port a direct match is hosted on. |
+| `quick_max_ping` | ms, 0 for anyone | Quick play turns down a farther opponent for your first 30 s in the queue. |
+| `online_first_to` | 0 (no end), 1, 2, 3, 5 | Online matches end when a player wins this many bouts. |
 | `online_delay` | `-1` (auto) or 0 to 8 | Online input delay in fields (1/60 s). Auto measures the round trip while the match is set up and takes the least that leaves rollback a field or two to hide: 0 on a LAN, 1 at about 70 ms, 2 from 100 ms. Both players get the larger of their two choices. |
 | `watch_hill` | 0 / 1 | Watch King of the Hill fights while waiting in line. |
 
@@ -154,6 +156,15 @@ Matches use rollback netcode, and players with different refresh rates can play 
 follows the connection (0 on a LAN), and the controllers are read before every tick of the simulation, so at
 a high frame rate a press counts within a few milliseconds, online as well as off. Pausing is off in an
 online fight. Memory cards are off during online matches; your own game is set aside and comes back after.
+
+While a match is being set up you see your opponent's round trip and whether the connection is direct; during
+it the banner shows the round trip, the input delay and the deepest rollback lately. Quick play turns down an
+opponent further than **Quick play ping** (160 ms by default) for your first 30 seconds in the queue, then takes
+anyone. Sounds that a rollback finds you should have heard (a clash the prediction missed) play after all, a
+few frames late. The banner keeps the score of the match (You 2 - 1 NAME); with **Online set** at "first to N"
+(F1 Options or the launcher; the longer of the two players' choices counts) the match ends when someone wins
+the set. Every online match is saved to `replays/`; **Play online, Replays** plays one back (replays play only
+on the version that made them).
 
 ## For developers
 
@@ -221,7 +232,8 @@ stderr), `DOJO_DUMP_DESYNC` (netplay saves its state before a field the two mach
 `desync_p<player>_<field>.bin`), `DOJO_PRESS_TICKS=seed` (the local controller changes from one tick's
 sample to the next, for testing netplay's per-tick input), `DOJO_DUMP_SETTLED=field` and `DOJO_DUMP_WATCH=field`
 (a player's settled state before that field, a spectator's; `all` for every checked field to 600), and
-`DOJO_HIDDEN` (no window on the screen, the software renderer and the default settings, dojo.ini neither read
+`DOJO_QUICK_MAX_PING`, `DOJO_FIRST_TO` (those settings, for a test), `DOJO_REPLAY=file` (plays a replay from
+`replays/`), `DOJO_HIDDEN` (no window on the screen, the software renderer and the default settings, dojo.ini neither read
 nor written: for tests run while someone uses the machine). Release builds write no PDB, so for
 `tools/statediff.py` build RelWithDebInfo, or the names it gives come from an older build. `tools/statediff.py` compares two dumps variable by variable through the builds' PDBs (pointers by
 what they name), so a build can be checked against an older one even when variables were added.

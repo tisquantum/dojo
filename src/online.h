@@ -54,6 +54,11 @@ int OnlineInMatch(void);
 /* Lines describing where online play is, for the menu; and a short one for during a match or a wait. */
 void OnlineDescribe(char *out, int size);
 void OnlineBanner(char *out, int size);
+/* Replays: every online match is saved to replays/ when it ends. Lists the newest first (file names, up to
+ * `max`); plays one, as a spectator watches, from the starting state this game makes (only a replay this
+ * version made plays right). Returns 0 with a message if it can't. */
+int OnlineListReplays(char names[][96], int max);
+int OnlinePlayReplay(const char *file);
 /* A message that should be shown once (an error, a result), or NULL. */
 const char *OnlineTakeMessage(void);
 

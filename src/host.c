@@ -793,6 +793,9 @@ int main(int argc, char **argv)
         if (quickPing) {
             g_settings.quickMaxPing = atoi(quickPing);
         }
+        if (SDL_getenv("DOJO_FIRST_TO")) {
+            g_settings.firstTo = atoi(SDL_getenv("DOJO_FIRST_TO"));
+        }
         if (scale) {
             g_settings.scale = atoi(scale) < 1 ? 1 : (atoi(scale) > 8 ? 8 : atoi(scale));
         }
@@ -947,6 +950,11 @@ int main(int argc, char **argv)
              * testing online play from a script. */
             static int asked;
             const char *action = SDL_getenv("DOJO_ONLINE");
+            if (!asked && SDL_getenv("DOJO_REPLAY")) {
+                /* DOJO_REPLAY=file: plays that replay (in replays/), for testing */
+                asked = 1;
+                OnlinePlayReplay(SDL_getenv("DOJO_REPLAY"));
+            }
             if (action && !asked && strcmp(action, "host") == 0) {
                 asked = 1;
                 OnlineHostDirect();

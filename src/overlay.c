@@ -19,13 +19,13 @@
 #define CAPTURE_MS   6000
 
 typedef enum Page {
-    PAGE_MAIN, PAGE_OPTIONS, PAGE_CONTROLS, PAGE_ONLINE, PAGE_PRIVATE, PAGE_CODE, PAGE_WAIT, PAGE_COUNT
+    PAGE_MAIN, PAGE_OPTIONS, PAGE_CONTROLS, PAGE_ONLINE, PAGE_PRIVATE, PAGE_CODE, PAGE_WAIT, PAGE_REPLAYS, PAGE_COUNT
 } Page;
 
 enum { MAIN_RESUME, MAIN_ONLINE, MAIN_OPTIONS, MAIN_CONTROLS, MAIN_QUIT, MAIN_COUNT };
 enum {
     OPT_FPS, OPT_SCALE, OPT_ASPECT, OPT_RENDERER, OPT_DISPLAY, OPT_VSYNC, OPT_VOLUME, OPT_COUNTER, OPT_DELAY,
-    OPT_QUICK_PING, OPT_BACK, OPT_COUNT
+    OPT_QUICK_PING, OPT_FIRST_TO, OPT_BACK, OPT_COUNT
 };
 /* The controls page: the devices and rumble, then a row of bindings for each console button. */
 enum {
@@ -33,26 +33,33 @@ enum {
     CTL_BACK = CTL_BIND + SETTINGS_BUTTONS, CTL_COUNT
 };
 #define CTL_COLUMNS (SETTINGS_BIND_SLOTS + 1) /* the bindings, then the row's reset */
-enum { ONLINE_ROW_QUICK, ONLINE_ROW_PRIVATE, ONLINE_ROW_HILL, ONLINE_ROW_PRIVATE_HILL, ONLINE_ROW_BACK, ONLINE_ROW_COUNT };
+enum {
+    ONLINE_ROW_QUICK, ONLINE_ROW_PRIVATE, ONLINE_ROW_HILL, ONLINE_ROW_PRIVATE_HILL, ONLINE_ROW_REPLAYS, ONLINE_ROW_BACK,
+    ONLINE_ROW_COUNT
+};
+#define REPLAYS_SHOWN 12
 enum { PRIVATE_CREATE, PRIVATE_JOIN, PRIVATE_HOST_DIRECT, PRIVATE_JOIN_DIRECT, PRIVATE_BACK, PRIVATE_COUNT };
 enum { CODE_ENTRY, CODE_GO, CODE_BACK, CODE_COUNT };
 enum { WAIT_LEAVE, WAIT_WATCH, WAIT_COUNT };
 
-static const int sRowCounts[PAGE_COUNT] = {MAIN_COUNT,    OPT_COUNT,  CTL_COUNT, ONLINE_ROW_COUNT,
-                                           PRIVATE_COUNT, CODE_COUNT, WAIT_COUNT};
-static const char *const sTitles[PAGE_COUNT] = {"DOJO",          "OPTIONS",      "CONTROLS",   "PLAY ONLINE",
-                                                "PRIVATE MATCH", "ENTER A CODE", "PLAY ONLINE"};
+/* The replays page's rows are the replays found, then Back. */
+static int sRowCounts[PAGE_COUNT] = {MAIN_COUNT, OPT_COUNT,  CTL_COUNT,  ONLINE_ROW_COUNT,
+                                     PRIVATE_COUNT, CODE_COUNT, WAIT_COUNT, 1};
+static const char *const sTitles[PAGE_COUNT] = {"DOJO",          "OPTIONS",      "CONTROLS",    "PLAY ONLINE",
+                                                "PRIVATE MATCH", "ENTER A CODE", "PLAY ONLINE", "REPLAYS"};
+static char sReplays[REPLAYS_SHOWN][96];
+static int sReplayCount;
 static const char *const sMainLabels[MAIN_COUNT] = {"Resume", "Play online", "Options", "Controls", "Quit game"};
 static const char *const sOptionLabels[OPT_COUNT] = {
     "Frame rate", "Resolution", "Aspect ratio", "Renderer", "Display", "VSync", "Volume", "Frame counter",
-    "Online input delay", "Quick play ping", "Back",
+    "Online input delay", "Quick play ping", "Online set", "Back",
 };
 static const char *const sControlLabels[CTL_BIND] = {
     "Player 1 gamepad", "Player 2 gamepad", "Keyboard & mouse", "Left stick moves", "Stick dead zone", "Rumble",
     "DualSense haptics", "Reset all bindings",
 };
 static const char *const sOnlineLabels[ONLINE_ROW_COUNT] = {"Quick play", "Private match", "King of the Hill",
-                                                            "Private hill (by code)", "Back"};
+                                                            "Private hill (by code)", "Replays", "Back"};
 static const char *const sPrivateLabels[PRIVATE_COUNT] = {"Create a room", "Join a room",
                                                           "Host directly (no server)", "Join directly by address",
                                                           "Back"};
@@ -171,6 +178,10 @@ static void Back(void)
         OnlineLeave();
         Go(PAGE_ONLINE);
         break;
+    case PAGE_REPLAYS:
+        Go(PAGE_ONLINE);
+        sRow = ONLINE_ROW_REPLAYS;
+        break;
     default:
         break;
     }
@@ -231,6 +242,15 @@ static void ChangeOption(int dir)
     case OPT_DELAY:
         s->onlineDelay = Step(s->onlineDelay, dir ? dir : 1, -1, 8); /* the next match on */
         break;
+    case OPT_FIRST_TO: {
+        static const int choices[] = {0, 1, 2, 3, 5};
+        int at = 0;
+        while (at < 5 && choices[at] != s->firstTo) {
+            at++;
+        }
+        s->firstTo = choices[Step(at == 5 ? 0 : at, dir ? dir : 1, 0, 4)];
+        break;
+    }
     case OPT_QUICK_PING: {
         static const int choices[] = {0, 80, 120, 160, 200, 250, 300};
         int n = (int)(sizeof(choices) / sizeof(choices[0])), at = 0;
@@ -441,6 +461,12 @@ static void Change(int dir)
             Go(PAGE_PRIVATE); /* player to player needs no server */
             return;
         }
+        if (sRow == ONLINE_ROW_REPLAYS) {
+            sReplayCount = OnlineListReplays(sReplays, REPLAYS_SHOWN); /* no server needed either */
+            sRowCounts[PAGE_REPLAYS] = sReplayCount + 1;
+            Go(PAGE_REPLAYS);
+            return;
+        }
         if (g_settings.offline) {
             Toast("Offline mode: only Private Match's direct matches work.");
             return;
@@ -512,6 +538,16 @@ static void Change(int dir)
             sDirty = 1;
         } else if (dir == 0) {
             Back();
+        }
+        break;
+    case PAGE_REPLAYS:
+        if (dir != 0) {
+            return;
+        }
+        if (sRow >= sReplayCount) {
+            Back();
+        } else if (OnlinePlayReplay(sReplays[sRow])) {
+            SetOpen(0);
         }
         break;
     default:
@@ -754,6 +790,13 @@ static void OptionValue(int row, char *out, size_t size)
     case OPT_COUNTER:
         snprintf(out, size, "%s", s->showFps ? "On" : "Off");
         break;
+    case OPT_FIRST_TO:
+        if (s->firstTo) {
+            snprintf(out, size, "First to %d (the longer of the two players' wins)", s->firstTo);
+        } else {
+            snprintf(out, size, "No end (play until someone leaves)");
+        }
+        break;
     case OPT_QUICK_PING:
         if (s->quickMaxPing) {
             snprintf(out, size, "Up to %d ms (anyone after 30 s)", s->quickMaxPing);
@@ -860,6 +903,20 @@ static const char *RowLabel(int row, char *buffer, size_t size)
     case PAGE_CONTROLS:
         return row < CTL_BIND ? sControlLabels[row] : row < CTL_BACK ? INPUT_BUTTONS[row - CTL_BIND].name : "Back";
     case PAGE_ONLINE: return sOnlineLabels[row];
+    case PAGE_REPLAYS:
+        if (row < sReplayCount) {
+            /* "2026-11-25_141502_brett_vs_kaz.dojoreplay" as "2026-11-25 14:15  brett vs kaz" */
+            const char *name = sReplays[row], *vs = strstr(name, "_vs_"), *dot = strstr(name, ".dojoreplay");
+            const char *who = strlen(name) > 18 ? name + 18 : name;
+            if (strlen(name) > 18 && vs && dot && vs > who) {
+                snprintf(buffer, size, "%.10s %.2s:%.2s  %.*s vs %.*s", name, name + 11, name + 13, (int)(vs - who),
+                         who, (int)(dot - vs - 4), vs + 4);
+            } else {
+                snprintf(buffer, size, "%s", name);
+            }
+            return buffer;
+        }
+        return sReplayCount ? "Back" : "No replays yet (online matches are saved)   Back";
     case PAGE_PRIVATE: return sPrivateLabels[row];
     case PAGE_CODE:
         if (row == CODE_ENTRY) {

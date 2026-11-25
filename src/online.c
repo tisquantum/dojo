@@ -66,6 +66,8 @@
 #define GS_UPDATE_CHARACTER_SELECT 10
 #define GS_INIT_BATTLE_REPLAY     17
 #define GS_INIT_CONTINUE_SCREEN   27
+#define GS_UPDATE_COMBAT          2
+#define GS_UPDATE_CONTINUE_SCREEN 28 /* lasts: the init states last a field, which a check may not see */
 
 #define PAD_START (1u << 11)
 #define PAD_DOWN  (1u << 14)
@@ -106,6 +108,11 @@ static struct {
     uint64_t peerHash;
     int ticks, delay;
     int winnerSide;        /* the bout's winner seen settled, or -1 */
+    int firstTo, peerFirstTo; /* the set: a side with this many bouts wins it (the larger of the two asked); 0: none */
+    int wins[2];           /* bouts won this match, by side */
+    int boutCounted;       /* this bout's winner is counted (until the next fight begins) */
+    uint32_t *record;      /* the match's settled inputs, for its replay: a sample of both pads a word */
+    uint32_t recordFields, recordWords, recordCapacity;
     int resultSent;
     uint32_t matchStartMs;
 
@@ -140,11 +147,13 @@ static struct {
         uint32_t next;     /* the next field to run */
         int ticks;
         int ended;         /* the match is over: run what is left, then stop */
+        int replay;        /* from a file (OnlinePlayReplay), not the server's log */
         uint32_t lastAskMs, lastNewMs;
     } W;
 
     char message[160];
     int hasMessage;
+    uint64_t replayHash;   /* the replay being played's starting state, to check against this game's */
 } O;
 
 #pragma pack(push, 1)
@@ -622,9 +631,96 @@ void OnlineKingOfTheHill(const char *code)
 static void StopWatching(void);
 static void TakeLog(const SpectateHeader *h, int size);
 
+/* The settled inputs not yet recorded, for the match's replay. */
+static void RecordSettled(void)
+{
+    uint32_t settled = NetplaySettledFields(), samples = (uint32_t)NetplaySamplesPerField(O.ticks);
+    for (; O.recordFields < settled; O.recordFields++) {
+        uint16_t a[NETPLAY_MAX_SAMPLES], b[NETPLAY_MAX_SAMPLES];
+        uint32_t i;
+        if (!NetplayInputsAt(O.recordFields, a, b)) {
+            break;
+        }
+        if (O.recordWords + samples > O.recordCapacity) {
+            O.recordCapacity = O.recordCapacity * 2 + 60 * 60 * NETPLAY_MAX_SAMPLES;
+            O.record = SDL_realloc(O.record, O.recordCapacity * sizeof(uint32_t));
+        }
+        for (i = 0; i < samples; i++) {
+            O.record[O.recordWords++] = a[i] | (uint32_t)b[i] << 16;
+        }
+    }
+}
+
+/* A replay (a .dojoreplay file in replays/): this header, then each field's samples of both pads, a word each. It plays
+ * only on a game that makes the same starting state (startHash, the simulation's revision in it). */
+#pragma pack(push, 1)
+typedef struct ReplayHeader {
+    char magic[4];         /* "DJRP" */
+    uint32_t version;      /* 1 */
+    uint64_t startHash;
+    uint32_t ticks, samples, fields;
+    char names[2][24];     /* the players on the left and right pads */
+} ReplayHeader;
+#pragma pack(pop)
+
+static void SafeName(char *out, size_t size, const char *name)
+{
+    size_t n = 0;
+    for (; *name && n + 1 < size; name++) {
+        char c = *name;
+        out[n++] = (char)(((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-')
+                              ? c : '-');
+    }
+    out[n] = 0;
+}
+
+static void SaveReplay(void)
+{
+    ReplayHeader h;
+    char path[160], left[24], right[24], when[32];
+    SDL_Time now;
+    SDL_DateTime t;
+    FILE *f;
+    RecordSettled();
+    if (O.recordFields < 300) {
+        return; /* under five seconds: no fight in it */
+    }
+    memset(&h, 0, sizeof(h));
+    memcpy(h.magic, "DJRP", 4);
+    h.version = 1;
+    h.startHash = O.startHash;
+    h.ticks = (uint32_t)O.ticks;
+    h.samples = (uint32_t)NetplaySamplesPerField(O.ticks);
+    h.fields = O.recordFields;
+    snprintf(h.names[O.role], sizeof(h.names[0]), "%s", g_settings.name);
+    snprintf(h.names[1 - O.role], sizeof(h.names[0]), "%s", O.peerName);
+    SafeName(left, sizeof(left), h.names[0]);
+    SafeName(right, sizeof(right), h.names[1]);
+    SDL_GetCurrentTime(&now);
+    SDL_TimeToDateTime(now, &t, true);
+    snprintf(when, sizeof(when), "%04d-%02d-%02d_%02d%02d%02d", t.year, t.month, t.day, t.hour, t.minute, t.second);
+    SDL_CreateDirectory("replays");
+    snprintf(path, sizeof(path), "replays/%s_%s_vs_%s.dojoreplay", when, left, right);
+    if ((f = fopen(path, "wb")) != NULL) {
+        fwrite(&h, sizeof(h), 1, f);
+        fwrite(O.record, sizeof(uint32_t), O.recordWords, f);
+        fclose(f);
+        fprintf(stderr, "online: replay saved: %s (%lu fields)\n", path, (unsigned long)h.fields);
+    }
+}
+
+/* The set's score from this machine's side, as "You 2 - 1 NAME", and whether someone has won it. */
+static int SetScore(char *out, size_t size)
+{
+    int mine = O.wins[O.role], theirs = O.wins[1 - O.role];
+    snprintf(out, size, "You %d - %d %s", mine, theirs, O.peerName);
+    return O.firstTo > 0 && (mine >= O.firstTo || theirs >= O.firstTo);
+}
+
 static void EndMatch(const char *why)
 {
     if (O.state == ONLINE_PLAYING) {
+        SaveReplay();
         NetplayEnd();
         BringOfflineBack();
     }
@@ -677,6 +773,10 @@ static void BeginSetupAddress(uint32_t matchId, int role, const struct sockaddr_
     snprintf(O.peerName, sizeof(O.peerName), "%s", name);
     O.direct = 0;
     O.haveHello = O.sentReady = O.peerReady = 0;
+    O.firstTo = O.peerFirstTo = 0;
+    O.wins[0] = O.wins[1] = 0;
+    O.boutCounted = 0;
+    O.recordFields = O.recordWords = 0;
     O.ownDelay = -1;
     O.declinedMs = 0;
     O.rttMs = 0;
@@ -795,7 +895,17 @@ static void ServerLine(char *line)
         unsigned long id = 0;
         sscanf(line, "%lu", &id);
         if ((uint32_t)id == O.matchId && (O.state == ONLINE_SETUP || O.state == ONLINE_PLAYING)) {
-            EndMatch("Your opponent left.");
+            char score[96], text[160];
+            if (SetScore(score, sizeof(score))) {
+                snprintf(text, sizeof(text), "%s the set: %s.", O.wins[O.role] >= O.firstTo ? "You won" : "You lost",
+                         score);
+                EndMatch(text); /* the other side saw the set end first */
+            } else if (O.wins[0] + O.wins[1] > 0) {
+                snprintf(text, sizeof(text), "Your opponent left. %s.", score);
+                EndMatch(text);
+            } else {
+                EndMatch("Your opponent left.");
+            }
             O.state = AfterMatch();
         }
     }
@@ -840,12 +950,16 @@ static void PeerLine(char *line, int direct)
     } else if (strcmp(word, "HELLO") == 0) {
         unsigned long long hash;
         char name[40];
-        int fields = sscanf(line, "%d %d %llx %39s", &O.peerTicks, &O.peerDelay, &hash, name);
+        /* "ticks delay hash name [set]": the set's length last, so 0.1.6 (without it) and later read each other */
+        int fields = sscanf(line, "%d %d %llx %39s %d", &O.peerTicks, &O.peerDelay, &hash, name, &O.peerFirstTo);
         if (fields >= 3) {
             O.peerHash = hash;
             O.haveHello = 1;
-            if (fields == 4) {
+            if (fields >= 4) {
                 snprintf(O.peerName, sizeof(O.peerName), "%s", name);
+            }
+            if (fields < 5) {
+                O.peerFirstTo = 0;
             }
         }
     } else if (strcmp(word, "READY") == 0) {
@@ -1000,8 +1114,8 @@ static void UpdateSetup(void)
         SendPeerText("PUNCH");
         SendPeerText("PING %lu", (unsigned long)now);
         if (O.start && O.ownDelay >= 0) {
-            SendPeerText("HELLO %d %d %016llx %s", HostOwnTicksPerFrame(), O.ownDelay, (unsigned long long)O.startHash,
-                         g_settings.name);
+            SendPeerText("HELLO %d %d %016llx %s %d", HostOwnTicksPerFrame(), O.ownDelay,
+                         (unsigned long long)O.startHash, g_settings.name, g_settings.firstTo);
         }
         if (O.sentReady) {
             SendPeerText("READY");
@@ -1021,6 +1135,8 @@ static void UpdateSetup(void)
         }
         O.ticks = O.peerTicks > HostOwnTicksPerFrame() ? O.peerTicks : HostOwnTicksPerFrame();
         O.delay = O.peerDelay > O.ownDelay ? O.peerDelay : O.ownDelay;
+        /* the set: the longer of the two asked for (a hill's match is one bout whatever) */
+        O.firstTo = O.mode == ONLINE_KOTH ? 0 : (O.peerFirstTo > g_settings.firstTo ? O.peerFirstTo : g_settings.firstTo);
         O.sentReady = 1;
         SendPeerText("READY");
     }
@@ -1089,11 +1205,33 @@ static void UpdateMatch(void)
     if (O.mode == ONLINE_KOTH) {
         PushLog();
     }
+    RecordSettled();
     if (!NetplaySettled(&gameState, &winner)) {
         return;
     }
     if (winner >= 0 && gameState >= GS_INIT_BATTLE_REPLAY) {
         O.winnerSide = winner;
+        if (!O.boutCounted && winner < 2) {
+            O.wins[winner]++; /* from the settled game: both machines count the same */
+            O.boutCounted = 1;
+        }
+    }
+    if (gameState == GS_UPDATE_COMBAT) {
+        O.boutCounted = 0; /* a new fight */
+    }
+    /* A set: once a side has won it, the match ends when the game leaves the bout (its replay and victory
+     * seen), as a hill's does. */
+    if (O.mode != ONLINE_KOTH && (gameState == GS_INIT_CONTINUE_SCREEN || gameState == GS_UPDATE_CONTINUE_SCREEN ||
+                                  gameState == GS_INIT_MAIN_MENU || gameState == GS_UPDATE_CHARACTER_SELECT)) {
+        char score[96], text[160];
+        if (SetScore(score, sizeof(score))) {
+            snprintf(text, sizeof(text), "%s the set: %s.", O.wins[O.role] >= O.firstTo ? "You won" : "You lost",
+                     score);
+            SendServer("LEAVE");
+            EndMatch(text);
+            O.state = AfterMatch();
+            return;
+        }
     }
     /* King of the Hill: a bout decides it; once the game reaches its continue screen, the match is over. */
     if (O.mode == ONLINE_KOTH && O.winnerSide >= 0 &&
@@ -1178,13 +1316,17 @@ static void StopWatching(void)
     if (O.W.running) {
         BringOfflineBack();
     }
-    O.W.on = O.W.running = O.W.ended = 0;
+    O.W.on = O.W.running = O.W.ended = O.W.replay = 0;
     O.W.matchId = 0;
     O.W.have = O.W.total = O.W.next = 0;
 }
 
 void OnlineStopWatching(void)
 {
+    if (O.W.replay) {
+        StopWatching(); /* a replay just stops; the hill's watching setting stays as it was */
+        return;
+    }
     /* The log stays: turned on again, the same fight is caught up with. */
     if (O.W.running) {
         BringOfflineBack();
@@ -1201,7 +1343,7 @@ int OnlineWatching(void)
 
 int OnlineWantsToWatch(void)
 {
-    return O.W.on && g_settings.watch && O.start && O.state == ONLINE_WAITING;
+    return O.W.on && O.start && (O.W.replay || (g_settings.watch && O.state == ONLINE_WAITING));
 }
 
 /* The log's samples a field, at the watched match's rate. */
@@ -1265,6 +1407,31 @@ int OnlineWatchField(void)
     if (!OnlineWantsToWatch()) {
         return 0;
     }
+    if (O.W.replay) {
+        /* a replay: all of it here, played from the start to the end */
+        if (!O.W.running) {
+            if (O.replayHash != O.startHash) {
+                StopWatching();
+                Message("That replay was made by another version of Dojo: it can't be played here.");
+                return 0;
+            }
+            PutOfflineAside();
+            SaveStateLoad(O.start);
+            HostSetSimulationMargin(ONLINE_MARGIN);
+            NetplaySetCardsOff(1);
+            g_pcTicksPerFrame = O.W.ticks;
+            HostResetPacing();
+            O.W.running = 1;
+            O.W.next = 0;
+        }
+        if (O.W.next + WatchSamples() <= O.W.have) {
+            RunWatchedField(0);
+            return 1;
+        }
+        StopWatching();
+        Message("The replay is over.");
+        return 0;
+    }
     /* Ask for what is missing, a few times a second. */
     if (now - O.W.lastAskMs >= WATCH_MS) {
         O.W.lastAskMs = now;
@@ -1300,6 +1467,65 @@ int OnlineWatchField(void)
         StopWatching(); /* the fight is over, or its log stopped coming */
     }
     return 0;
+}
+
+static int NewestFirst(const void *a, const void *b)
+{
+    return strcmp(*(char *const *)b, *(char *const *)a); /* names begin with the date */
+}
+
+int OnlineListReplays(char names[][96], int max)
+{
+    int count = 0, i, n = 0;
+    char **files = SDL_GlobDirectory("replays", "*.dojoreplay", 0, &count);
+    if (!files) {
+        return 0;
+    }
+    qsort(files, (size_t)count, sizeof(char *), NewestFirst);
+    for (i = 0; i < count && n < max; i++) {
+        snprintf(names[n++], 96, "%s", files[i]);
+    }
+    SDL_free(files);
+    return n;
+}
+
+int OnlinePlayReplay(const char *file)
+{
+    char path[160];
+    ReplayHeader h;
+    FILE *f;
+    uint32_t words;
+    if (O.state != ONLINE_OFF && O.state != ONLINE_IDLE) {
+        Message("Leave the queue or match first.");
+        return 0;
+    }
+    snprintf(path, sizeof(path), "replays/%s", file);
+    if ((f = fopen(path, "rb")) == NULL) {
+        Message("That replay can't be opened.");
+        return 0;
+    }
+    if (fread(&h, sizeof(h), 1, f) != 1 || memcmp(h.magic, "DJRP", 4) != 0 || h.version != 1 || !h.samples ||
+        h.samples > NETPLAY_MAX_SAMPLES || h.fields > 60 * 60 * 60) {
+        fclose(f);
+        Message("That isn't a replay this version can read.");
+        return 0;
+    }
+    words = h.fields * h.samples;
+    StopWatching();
+    O.W.log = SDL_realloc(O.W.log, (words + 1) * sizeof(uint32_t));
+    O.W.capacity = words + 1;
+    O.W.have = O.W.total = (uint32_t)fread(O.W.log, sizeof(uint32_t), words, f);
+    fclose(f);
+    O.W.ticks = (int)h.ticks;
+    O.W.ended = O.W.on = O.W.replay = 1;
+    snprintf(O.W.names[0], sizeof(O.W.names[0]), "%.23s", h.names[0]);
+    snprintf(O.W.names[1], sizeof(O.W.names[1]), "%.23s", h.names[1]);
+    O.replayHash = h.startHash;
+    if (!O.start) {
+        StartPreparing(); /* the starting state, made here as the players' games made it */
+        Message("Getting the game ready for the replay...");
+    }
+    return 1;
 }
 
 OnlineState OnlineGetState(void)
@@ -1352,6 +1578,10 @@ void OnlineDescribe(char *out, int size)
 void OnlineBanner(char *out, int size)
 {
     out[0] = 0;
+    if (O.W.running && O.W.replay) {
+        snprintf(out, (size_t)size, "Replay: %s vs %s   (hold Back: stop)", O.W.names[0], O.W.names[1]);
+        return;
+    }
     if (O.W.running) {
         if (O.queuePosition > 0) {
             snprintf(out, (size_t)size, "Watching %s vs %s   You are %d of %d in line   (hold Back: stop watching)",
@@ -1380,7 +1610,12 @@ void OnlineBanner(char *out, int size)
             if (O.mode == ONLINE_KOTH) {
                 snprintf(out, (size_t)size, "vs %s   %s   King of the Hill", O.peerName, connection);
             } else {
-                snprintf(out, (size_t)size, "vs %s   %s", O.peerName, connection);
+                char score[96], set[24] = "";
+                SetScore(score, sizeof(score));
+                if (O.firstTo > 0) {
+                    snprintf(set, sizeof(set), " (first to %d)", O.firstTo);
+                }
+                snprintf(out, (size_t)size, "%s%s   %s", score, set, connection);
             }
         }
     } else if (O.state == ONLINE_WAITING || O.state == ONLINE_SETUP) {

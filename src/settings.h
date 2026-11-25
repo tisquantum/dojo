@@ -31,6 +31,7 @@ typedef struct Settings {
     int offline;    /* never contact the matchmaking server (direct player-to-player matches still work) */
     int onlineDelay; /* online input delay in fields: -1 picks the least the connection allows */
     int quickMaxPing; /* quick play turns down an opponent further than this (ms, 0: any) for its first 30 s */
+    int firstTo;    /* an online set's length: the first to win this many bouts (0: no end) */
 } Settings;
 
 #define SETTINGS_ASPECT_COUNT 7
