@@ -19,6 +19,9 @@ typedef struct GpuDisplay {
 } GpuDisplay;
 
 extern GpuDisplay g_gpuDisplay;
+/* Counts what changes video memory (drawing, fills, uploads), outside the simulation: the host presents a
+ * picture only when it or the shown area changed. */
+extern unsigned g_gpuDrawCount;
 
 void GpuReset(void);
 /* Runs one GP0 command of `words` words. */

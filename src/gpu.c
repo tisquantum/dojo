@@ -153,6 +153,7 @@ typedef struct PrimState {
 /* Which renderer draws is the machine's setting, not the simulation's. */
 #pragma clang section bss = ".bss$render" data = ".data$render"
 static const GpuRenderer *sRenderer;
+unsigned g_gpuDrawCount;
 #pragma clang section bss = ".bss$sim" data = ".data$sim"
 
 void GpuSetRenderer(const GpuRenderer *renderer)
@@ -496,6 +497,7 @@ void GpuCommand(const uint32_t *w, int count)
 {
     uint32_t code = w[0] >> 24;
     (void)count;
+    g_gpuDrawCount++;
 
     if (code >= 0x20 && code < 0x40) {
         DrawPolygon(w);
@@ -608,6 +610,7 @@ void GpuCommand(const uint32_t *w, int count)
 
 void GpuFillRect(int x, int y, int w, int h, uint32_t rgb)
 {
+    g_gpuDrawCount++;
     uint16_t c = (uint16_t)(((rgb >> 3) & 31) | ((rgb >> 11) & 31) << 5 | ((rgb >> 19) & 31) << 10);
     int i, j;
     for (j = 0; j < h; j++) {
@@ -622,6 +625,7 @@ void GpuFillRect(int x, int y, int w, int h, uint32_t rgb)
 
 void GpuWriteVram(int x, int y, int w, int h, const uint16_t *src)
 {
+    g_gpuDrawCount++;
     int i, j;
     for (j = 0; j < h; j++) {
         for (i = 0; i < w; i++) {

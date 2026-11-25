@@ -232,7 +232,7 @@ stderr), `DOJO_DUMP_DESYNC` (netplay saves its state before a field the two mach
 `desync_p<player>_<field>.bin`), `DOJO_PRESS_TICKS=seed` (the local controller changes from one tick's
 sample to the next, for testing netplay's per-tick input), `DOJO_DUMP_SETTLED=field` and `DOJO_DUMP_WATCH=field`
 (a player's settled state before that field, a spectator's; `all` for every checked field to 600), and
-`DOJO_QUICK_MAX_PING`, `DOJO_FIRST_TO` (those settings, for a test), `DOJO_REPLAY=file` (plays a replay from
+`DOJO_QUICK_MAX_PING`, `DOJO_FIRST_TO` (those settings, for a test), `DOJO_LOG_FPS` (the frame counter to the log), `DOJO_DISPLAY_HZ` (as if the display ran at that rate), `DOJO_REPLAY=file` (plays a replay from
 `replays/`), `DOJO_HIDDEN` (no window on the screen, the software renderer and the default settings, dojo.ini neither read
 nor written: for tests run while someone uses the machine). Release builds write no PDB, so for
 `tools/statediff.py` build RelWithDebInfo, or the names it gives come from an older build. `tools/statediff.py` compares two dumps variable by variable through the builds' PDBs (pointers by

@@ -735,6 +735,9 @@ void OverlayFramePresented(void)
         int fps = (int)((Uint64)sCount * 1000000000ull / (now - sCountStart));
         sCount = 0;
         sCountStart = now;
+        if (SDL_getenv("DOJO_LOG_FPS")) {
+            fprintf(stderr, "fps %d\n", fps); /* the frame counter, for a test that can't see it */
+        }
         if (fps != sFpsShown) {
             sFpsShown = fps;
             if (g_settings.showFps) {

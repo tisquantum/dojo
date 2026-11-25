@@ -308,6 +308,36 @@ static void SetAspect(void)
 static SDL_Texture *sOverlayTexture;
 static void UpdateOverlayContext(void);
 
+static int DisplayHz(void);
+static int sPresentForced = 1; /* the window changed: present even an unchanged picture */
+
+/* Whether this picture is shown: not when nothing changed since the last one shown (a field's end inside a
+ * tick, a menu's second field), and with vsync, not before the display's next refresh is due (the
+ * simulation's rate, a multiple of 30, isn't the display's; a driver set to ignore vsync would otherwise show
+ * every one). */
+static int PresentDue(int overlayChanged)
+{
+    static unsigned shownDraws;
+    static GpuDisplay shownDisplay;
+    static Uint64 nextNs;
+    Uint64 now = SDL_GetTicksNS(), interval;
+    if (!sPresentForced && !overlayChanged && g_gpuDrawCount == shownDraws &&
+        memcmp(&g_gpuDisplay, &shownDisplay, sizeof(shownDisplay)) == 0) {
+        return 0;
+    }
+    if (g_settings.vsync && !sPresentForced) {
+        interval = 1000000000ull / (Uint64)DisplayHz();
+        if (now + interval / 8 < nextNs) {
+            return 0; /* the display can't show it before the next one is ready */
+        }
+        nextNs = now > nextNs + interval ? now + interval : nextNs + interval;
+    }
+    sPresentForced = 0;
+    shownDraws = g_gpuDrawCount;
+    shownDisplay = g_gpuDisplay;
+    return 1;
+}
+
 /* Converts the display area of video memory to the texture and draws it 4:3 in the window. */
 static void Present(void)
 {
@@ -323,6 +353,12 @@ static void Present(void)
 
     UpdateOverlayContext();
     overlay = OverlayPicture(&overlayChanged);
+    if (sShotEvery && sField % sShotEvery == 0) {
+        sPresentForced = 1; /* a test's screenshot is taken from the presented picture */
+    }
+    if (!PresentDue(overlayChanged)) {
+        return;
+    }
     OverlayFramePresented();
     if (overlay && overlayChanged && SDL_getenv("DOJO_MENU_AT")) {
         /* A test's look at the overlay: over mid grey, as menu.bmp. */
@@ -469,6 +505,12 @@ static void PumpEvents(void)
             continue;
         }
         switch (e.type) {
+        case SDL_EVENT_WINDOW_RESIZED:
+        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+        case SDL_EVENT_WINDOW_EXPOSED:
+        case SDL_EVENT_WINDOW_RESTORED:
+            sPresentForced = 1;
+            break;
         case SDL_EVENT_QUIT:
             sQuit = 1;
             break;
@@ -651,6 +693,9 @@ void HostPresentTick(void)
 static int DisplayHz(void)
 {
     const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(sWindow));
+    if (SDL_getenv("DOJO_DISPLAY_HZ")) {
+        return SDL_atoi(SDL_getenv("DOJO_DISPLAY_HZ")); /* for a test: as if the display ran at this rate */
+    }
     return (mode && mode->refresh_rate > 0) ? (int)(mode->refresh_rate + 0.5f) : 60;
 }
 
