@@ -1260,12 +1260,16 @@ class Launcher:
                      "-DDOJO_DISC=" + os.path.abspath(self.disc_bin())]
         cache = os.path.join(BUILD_DIR, "CMakeCache.txt")
         if os.path.isfile(cache):
-            # A cache from before the bundled toolchain, or from a configure that failed to find the compiler
-            # (no compiler flags, so no optimisation), is started over.
+            # A cache from before the bundled toolchain, from a configure that failed to find the compiler
+            # (no compiler flags, so no optimisation), or from where this folder was before it was moved or
+            # renamed (CMake refuses one made elsewhere) is started over. dojo.ini and the rest stay.
             with open(cache, encoding="utf-8", errors="replace") as f:
                 text = f.read()
+            home = re.search(r"^CMAKE_HOME_DIRECTORY:INTERNAL=(.*)$", text, re.M)
+            moved = home is not None and \
+                os.path.normcase(os.path.normpath(home.group(1).strip())) != os.path.normcase(os.path.normpath(PORT_DIR))
             if "CMAKE_C_FLAGS_%s:STRING=\n" % self.build_type.get().upper() in text or \
-                    "i686-w64-mingw32-clang" not in text:
+                    "i686-w64-mingw32-clang" not in text or moved:
                 os.remove(cache)
                 shutil.rmtree(os.path.join(BUILD_DIR, "CMakeFiles"), ignore_errors=True)
         self.run_steps([configure, [CMAKE, "--build", BUILD_DIR]], "Built.", then_play=then_play)
