@@ -116,7 +116,7 @@ The launcher's Settings tab and the in-game options menu (**F1**) change the sam
 
 | Key | Values | |
 |---|---|---|
-| `fps` | `0` (the most the display shows: 120 at 144 Hz) or 30 to 480 in steps of 30 | The game's rate. `30` is the original exactly. Online, both players run the higher of their two rates. |
+| `fps` | `0` (Auto: the first multiple of 30 at or above the display's rate, shown at the display's rate: 150 shown at 144 on a 144 Hz display) or 30 to 480 in steps of 30 | The game's rate. `30` is the original exactly. Online, both players run the higher of their two rates. |
 | `aspect` | `auto`, `4:3`, `16:10`, `16:9`, `21:9`, `24:10`, `32:9` | Aspect ratio; `auto` matches the display. |
 | `scale` | 1 to 8 | Resolution as a multiple of the console's 320x240 (Vulkan only). |
 | `software` | 0 / 1 | 1: the software (CPU) renderer instead of Vulkan. |

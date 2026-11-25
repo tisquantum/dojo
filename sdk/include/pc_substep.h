@@ -24,6 +24,15 @@ extern int g_pcSubtick;
  * frame's last tick, where this is frames * g_pcFrameTicks; the ticks before step up to it from the last
  * frame's. With one tick a frame it is `frames`. */
 #define PC_TICKS(frames) ((frames) * g_pcFrameTicks - (g_pcFrameTicks - 1 - g_pcSubtick))
+/* How far a tick is through its frame, in Q12: 4096 on the last tick. For what the game keeps only per frame
+ * (a baked camera track, a recorded pose): a tick shows the last frame's value moving to this one's, the
+ * last tick this one's exactly. PC_BLEND_ANGLE goes the short way round a 4096-unit turn. */
+#define PC_FRAME_Q12 (((g_pcSubtick + 1) << 12) / g_pcFrameTicks)
+#define PC_BLEND(last, now)                                                                                    \
+    (PC_LAST_SUBTICK ? (now) : (last) + (int)(((long long)((now) - (last)) * PC_FRAME_Q12) >> 12))
+#define PC_BLEND_ANGLE(last, now)                                                                              \
+    (PC_LAST_SUBTICK ? (now)                                                                                   \
+                     : (last) + (int)(((long long)((((now) - (last) + 2048) & 4095) - 2048) * PC_FRAME_Q12) >> 12))
 /* A per-frame amount that comes all at once at the end of the frame (a velocity's gravity): 0 before. */
 #define PC_ON_LAST(perFrame) (PC_LAST_SUBTICK ? (perFrame) : 0)
 

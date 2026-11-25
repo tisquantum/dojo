@@ -315,9 +315,9 @@ static int sSlowPresents;      /* presents in a row that took most of a refresh 
 static int sPresenting;        /* this call presents a picture (not skipped as unchanged or early) */
 
 /* Whether this picture is shown: not when nothing changed since the last one shown (a field's end inside a
- * tick, a menu's second field), and with vsync, not before the display's next refresh is due (the
- * simulation's rate, a multiple of 30, isn't the display's; a driver set to ignore vsync would otherwise show
- * every one). */
+ * tick, a menu's second field), and with vsync or the Auto frame rate, not before the display's next refresh
+ * is due (the simulation's rate, a multiple of 30, isn't the display's: Auto runs it past the display's and
+ * shows the display's worth; a driver set to ignore vsync would otherwise show every one). */
 static int PresentDue(int overlayChanged)
 {
     static unsigned shownDraws;
@@ -328,7 +328,7 @@ static int PresentDue(int overlayChanged)
         memcmp(&g_gpuDisplay, &shownDisplay, sizeof(shownDisplay)) == 0) {
         return 0;
     }
-    if ((g_settings.vsync || sDriverPaces) && !sPresentForced) {
+    if ((g_settings.vsync || sDriverPaces || g_settings.fps == 0) && !sPresentForced) {
         interval = 1000000000ull / (Uint64)DisplayHz();
         if (now + interval / 8 < nextNs) {
             return 0; /* the display can't show it before the next one is ready */
@@ -728,9 +728,9 @@ static int DisplayHz(void)
  * console frame, a whole number of 30ths. */
 static int ChooseTicksPerFrame(void)
 {
-    /* A set rate is a multiple of 30 already; Auto takes the most the display shows (144 Hz: 120), as a rate
-     * past the display's is pictures it can't show. */
-    int ticks = g_settings.fps > 0 ? (g_settings.fps + 15) / 30 : DisplayHz() / 30;
+    /* A set rate is a multiple of 30 already. Auto takes the first at or above the display's (144 Hz: 150), so
+     * every refresh has a new picture: they are shown at the display's rate (PresentDue), the rest skipped. */
+    int ticks = g_settings.fps > 0 ? (g_settings.fps + 15) / 30 : (DisplayHz() + 29) / 30;
     return ticks < 1 ? 1 : (ticks > 16 ? 16 : ticks);
 }
 

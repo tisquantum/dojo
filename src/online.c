@@ -44,8 +44,8 @@
 /* Raised whenever a change makes the same inputs play out differently (the game's code, not its data, so the
  * starting state's hash alone can't tell): mixed into that hash, it turns away a player on another version.
  * 2: rain and foliage across the widescreen margin (0.1.5). 3: no pausing in a fight (0.1.6). 4: the controllers sampled before
- * every tick, not each field (0.1.6). */
-#define SIM_REVISION    4
+ * every tick, not each field (0.1.6). 5: the opening and story scenes at the rate set (0.1.8). */
+#define SIM_REVISION    5
 #define PUNCH_MS        150
 #define RELAY_AFTER_MS  1500 /* no direct answer by then: through the server */
 #define SETUP_GIVE_UP_MS 20000
@@ -327,6 +327,9 @@ static void StartPreparing(void)
     PutOfflineAside();
     SaveStateLoad(HostBootState());
     HostSetSimulationMargin(ONLINE_MARGIN);
+    /* The console's rate: the way to the character select passes the opening, which runs at the rate set, and
+     * every machine must reach the same state whatever its own (BringOfflineBack puts its own back). */
+    g_pcTicksPerFrame = 1;
     NetplaySetCardsOff(1);
     O.preparing = 1;
     O.phase = 0;

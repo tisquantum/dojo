@@ -14,11 +14,15 @@ int g_pcSubtick;
 
 /* The states whose code is written for ticks (see pc_substep.h): combat and the scenes the fighters play
  * in (the attract mode's bout, the replay, the victory and continue screens, the Slash-clear and approach
- * cutscenes). */
+ * cutscenes), the opening, the story's cutscenes and its prologue. Not the character select, where online
+ * matches start and return: its state must be the same at every rate. */
 int PcStateSubsteps(int gameState)
 {
     switch (gameState) {
     case 2:  /* GAME_STATE_UPDATE_COMBAT */
+    case 4:  /* GAME_STATE_UPDATE_OPENING */
+    case 26: /* GAME_STATE_UPDATE_STORY_CUTSCENE */
+    case 38: /* GAME_STATE_UPDATE_STORY_PROLOGUE */
     case 6:  /* GAME_STATE_UPDATE_DEMO_BATTLE */
     case 14: /* GAME_STATE_UPDATE_SLASH_CLEAR_CUTSCENE */
     case 18: /* GAME_STATE_UPDATE_BATTLE_REPLAY */
