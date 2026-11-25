@@ -210,6 +210,7 @@ void NetplayBegin(const NetplayTransport *transport, int local, int delay)
 void NetplayEnd(void)
 {
     N.active = 0;
+    SpuEndFields();
 }
 
 int NetplayLocalPlayer(void)
@@ -414,6 +415,7 @@ static void RunGameField(uint32_t field, int again)
     SaveStateSave(state);
     N.stateField[field % RING] = field;
     RemoteInputFor(field, remote);
+    SpuBeginField((long)field, !again);
     for (tick = 0;; tick++) {
         int sample = tick < N.samples ? tick : N.samples - 1;
         if (!again && tick > 0 && tick < N.samples) {
@@ -617,6 +619,7 @@ int NetplayRunField(unsigned localButtons)
         for (f = N.rollbackFrom; f < N.field; f++) {
             RunGameField(f, 1);
         }
+        SpuRestoreAfterRollback((long)N.rollbackFrom, (long)N.field);
         N.rollbacks++;
         N.rolledFields += N.field - N.rollbackFrom;
         N.rollbackFrom = UINT32_MAX;
@@ -636,9 +639,10 @@ int NetplayRunField(unsigned localButtons)
         }
     }
     Send();
-    snprintf(N.status, sizeof(N.status), "player %d | delay %d | rtt %u ms | rollbacks %u (%u fields) | waits %u%s%s",
-             N.local + 1, N.delay, N.rttMs, N.rollbacks, N.rolledFields, N.stalls, N.desync[0] ? " | " : "",
-             N.desync);
+    snprintf(N.status, sizeof(N.status),
+             "player %d | delay %d | rtt %u ms | rollbacks %u (%u fields) | sounds restored %u | waits %u%s%s",
+             N.local + 1, N.delay, N.rttMs, N.rollbacks, N.rolledFields, SpuRestoredSounds(), N.stalls,
+             N.desync[0] ? " | " : "", N.desync);
     return advanced;
 }
 

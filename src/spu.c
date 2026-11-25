@@ -84,6 +84,42 @@ static int16_t sCdPrev[2];
 static const int sAdpcmPos[5] = {0, 60, 115, 98, 122};
 static const int sAdpcmNeg[5] = {0, 0, -52, -55, -60};
 
+/* Sound after a rollback (spu.h), outside the simulation: what each field started, as heard and as last run,
+ * and the voices that play what a rollback found was started but never heard. */
+#pragma clang section bss = ".bss$render" data = ".data$render"
+#define SOUND_LOG_FIELDS 64
+#define SOUND_LOG_STARTS 24
+#define EXTRA_VOICES     8
+#define RESTORE_LATEST   8 /* fields: a sound found later than this is left unheard */
+
+typedef struct SoundStart {
+    uint8_t voice;
+    uint16_t address, pitch, adsr1, adsr2, volumeLeft, volumeRight;
+} SoundStart;
+
+typedef struct SoundLog {
+    uint32_t field;
+    int heardCount, ranCount;
+    SoundStart heard[SOUND_LOG_STARTS], ran[SOUND_LOG_STARTS];
+} SoundLog;
+
+static SoundLog sSoundLog[SOUND_LOG_FIELDS];
+static int32_t sLogField = -1;  /* the field running, or -1: none logged (offline, or watching) */
+static int sFieldHeard = 1;     /* whether the field running is heard (not one run again after a rollback) */
+
+typedef struct ExtraVoice {
+    int on;
+    int mirrors;                /* the game's voice it stands in for, which is silent meanwhile; or -1 */
+    SoundStart start;
+    Voice voice;
+    uint32_t samplesLeft;       /* a cap, for a sound that loops until keyed off */
+} ExtraVoice;
+
+static ExtraVoice sExtra[EXTRA_VOICES];
+static uint8_t sMuted[24];      /* the game's voices an extra voice plays for */
+static unsigned sRestored;      /* sounds restored, for the log */
+#pragma clang section bss = ".bss$sim" data = ".data$sim"
+
 static int16_t Clamp16(int32_t v)
 {
     return (int16_t)(v < -32768 ? -32768 : (v > 32767 ? 32767 : v));
@@ -182,9 +218,46 @@ static void RunEnvelope(Voice *v, int index)
     }
 }
 
+static int SameSound(const SoundStart *a, const SoundStart *b)
+{
+    return a->voice == b->voice && a->address == b->address && a->pitch == b->pitch;
+}
+
+/* A sound started: logged for the field running; it ends any stand-in for its voice. */
+static void LogSoundStart(int index)
+{
+    SoundStart start;
+    SoundLog *log;
+    int e;
+    for (e = 0; e < EXTRA_VOICES; e++) {
+        if (sExtra[e].on && sExtra[e].mirrors == index) {
+            sExtra[e].mirrors = -1; /* the game's voice moves on: the stand-in plays on by itself */
+        }
+    }
+    sMuted[index] = 0;
+    if (sLogField < 0) {
+        return;
+    }
+    start.voice = (uint8_t)index;
+    start.address = *VoiceReg(index, 3);
+    start.pitch = *VoiceReg(index, 2);
+    start.adsr1 = *VoiceReg(index, 4);
+    start.adsr2 = *VoiceReg(index, 5);
+    start.volumeLeft = *VoiceReg(index, 0);
+    start.volumeRight = *VoiceReg(index, 1);
+    log = &sSoundLog[(uint32_t)sLogField % SOUND_LOG_FIELDS];
+    if (log->ranCount < SOUND_LOG_STARTS) {
+        log->ran[log->ranCount++] = start;
+    }
+    if (sFieldHeard && log->heardCount < SOUND_LOG_STARTS) {
+        log->heard[log->heardCount++] = start;
+    }
+}
+
 static void KeyOn(int index)
 {
     Voice *v = &sVoices[index];
+    LogSoundStart(index);
     v->current = (uint32_t)*VoiceReg(index, 3) * 8;
     v->repeat = v->current;
     v->counter = 0;
@@ -203,6 +276,13 @@ static void KeyOn(int index)
 
 static void KeyOff(int index)
 {
+    int e;
+    for (e = 0; e < EXTRA_VOICES; e++) {
+        if (sExtra[e].on && sExtra[e].mirrors == index && sExtra[e].voice.envPhase != ENV_OFF) {
+            sExtra[e].voice.envPhase = ENV_RELEASE; /* the game let go of the sound it stands in for */
+            sExtra[e].voice.envCounter = 0;
+        }
+    }
     if (sVoices[index].envPhase != ENV_OFF) {
         sVoices[index].envPhase = ENV_RELEASE;
         sVoices[index].envCounter = 0;
@@ -280,6 +360,147 @@ static int32_t VoiceSample(int index, int32_t modulator)
     sample = (sample * v->envLevel) >> 15;
     v->output = (int16_t)sample;
     return sample;
+}
+
+/* An extra voice's next sample: the game's voice playback, from its own copy of the registers it started with,
+ * writing nothing of the simulation's. */
+static int32_t ExtraSample(ExtraVoice *x)
+{
+    Voice *v = &x->voice;
+    int32_t sample, a, b;
+    int position = (int)(v->counter >> 12), frac = (int)(v->counter & 0xFFF);
+    uint32_t step = x->start.pitch > 0x4000 ? 0x4000 : x->start.pitch;
+    if (!v->blockLoaded) {
+        DecodeBlock(v);
+    }
+    a = v->decoded[position];
+    b = position + 1 < 28 ? v->decoded[position + 1] : a;
+    sample = a + (((b - a) * frac) >> 12);
+    v->counter += step;
+    while ((v->counter >> 12) >= 28) {
+        int flags = sRam[(v->current + 1) & (SPU_RAM_SIZE - 1)];
+        v->counter -= 28 << 12;
+        if (flags & 1) {
+            v->current = v->repeat;
+            if (!(flags & 2)) {
+                v->envPhase = ENV_OFF;
+            }
+        } else {
+            v->current += 16;
+        }
+        DecodeBlock(v);
+    }
+    switch (v->envPhase) {
+    case ENV_ATTACK:
+        EnvelopeStep(v, (x->start.adsr1 >> 8) & 0x7F, 0, x->start.adsr1 >> 15);
+        if (v->envLevel >= 0x7FFF) {
+            v->envPhase = ENV_DECAY;
+            v->envCounter = 0;
+        }
+        break;
+    case ENV_DECAY:
+        EnvelopeStep(v, ((x->start.adsr1 >> 4) & 0x0F) * 4, 1, 1);
+        if (v->envLevel <= ((x->start.adsr1 & 0x0F) + 1) * 0x800) {
+            v->envPhase = ENV_SUSTAIN;
+            v->envCounter = 0;
+        }
+        break;
+    case ENV_SUSTAIN:
+        EnvelopeStep(v, (x->start.adsr2 >> 6) & 0x7F, (x->start.adsr2 >> 14) & 1, x->start.adsr2 >> 15);
+        break;
+    case ENV_RELEASE:
+        EnvelopeStep(v, (x->start.adsr2 & 0x1F) * 4, 1, (x->start.adsr2 >> 5) & 1);
+        if (v->envLevel == 0) {
+            v->envPhase = ENV_OFF;
+        }
+        break;
+    default:
+        break;
+    }
+    if (v->envPhase == ENV_OFF || --x->samplesLeft == 0) {
+        x->on = 0;
+        if (x->mirrors >= 0) {
+            sMuted[x->mirrors] = 0;
+        }
+        return 0;
+    }
+    return (sample * v->envLevel) >> 15;
+}
+
+void SpuBeginField(long field, int heard)
+{
+    SoundLog *log = &sSoundLog[(uint32_t)field % SOUND_LOG_FIELDS];
+    sLogField = field;
+    sFieldHeard = heard;
+    if (log->field != (uint32_t)field || heard) {
+        log->heardCount = 0; /* a field run for the first time: nothing of it heard yet */
+    }
+    log->field = (uint32_t)field;
+    log->ranCount = 0;
+}
+
+void SpuEndFields(void)
+{
+    sLogField = -1;
+    sFieldHeard = 1;
+}
+
+void SpuRestoreAfterRollback(long from, long to)
+{
+    long f;
+    if (to - from > RESTORE_LATEST) {
+        from = to - RESTORE_LATEST;
+    }
+    for (f = from; f < to; f++) {
+        SoundLog *log = &sSoundLog[(uint32_t)f % SOUND_LOG_FIELDS];
+        int i, j, e;
+        if (log->field != (uint32_t)f) {
+            continue;
+        }
+        for (i = 0; i < log->ranCount; i++) {
+            const SoundStart *s = &log->ran[i];
+            int heard = 0, laterStart = 0;
+            long g;
+            for (j = 0; j < log->heardCount && !heard; j++) {
+                heard = SameSound(s, &log->heard[j]);
+            }
+            if (heard) {
+                continue;
+            }
+            /* Started in the corrected run and never heard: from its beginning now, on an extra voice. */
+            for (e = 0; e < EXTRA_VOICES && sExtra[e].on; e++) {
+            }
+            if (e == EXTRA_VOICES) {
+                return;
+            }
+            /* The game's voice still holds it unless a later field started another sound on it. */
+            for (g = f + 1; g < to && !laterStart; g++) {
+                const SoundLog *later = &sSoundLog[(uint32_t)g % SOUND_LOG_FIELDS];
+                for (j = 0; later->field == (uint32_t)g && j < later->ranCount; j++) {
+                    laterStart |= later->ran[j].voice == s->voice;
+                }
+            }
+            memset(&sExtra[e], 0, sizeof(sExtra[e]));
+            sExtra[e].on = 1;
+            sExtra[e].start = *s;
+            sExtra[e].voice.current = sExtra[e].voice.repeat = (uint32_t)s->address * 8;
+            sExtra[e].voice.envPhase = ENV_ATTACK;
+            sExtra[e].samplesLeft = SPU_SAMPLE_RATE * 4;
+            sExtra[e].mirrors = laterStart ? -1 : s->voice;
+            if (!laterStart) {
+                sMuted[s->voice] = 1;
+            }
+            if (log->heardCount < SOUND_LOG_STARTS) {
+                log->heard[log->heardCount++] = *s; /* heard now: not again on another rollback */
+            }
+            sRestored++;
+        }
+    }
+}
+
+unsigned SpuRestoredSounds(void)
+{
+    return sRestored;
 }
 
 /* The reverb unit's buffer, addressed relative to its moving current position. */
@@ -396,15 +617,35 @@ static void MixSample(int16_t out[2], int16_t haptic[2])
         int32_t l = Mul15(s, VolumeLevel(*VoiceReg(i, 0))) * 2;
         int32_t r = Mul15(s, VolumeLevel(*VoiceReg(i, 1))) * 2;
         modulator = s;
+        if (VoiceBit(R_EON_L, i)) {
+            /* the reverb's buffer is in sound RAM, the simulation's: it gets every voice, muted or not */
+            revL += l;
+            revR += r;
+        }
+        if (sMuted[i]) {
+            l = r = 0; /* an extra voice plays this sound from its beginning (SpuRestoreAfterRollback) */
+        }
         left += l;
         right += r;
         if (i >= HAPTIC_VOICE_FIRST && i < HAPTIC_VOICE_END) {
             hapticL += l;
             hapticR += r;
         }
-        if (VoiceBit(R_EON_L, i)) {
-            revL += l;
-            revR += r;
+    }
+    if (sFieldHeard) {
+        int e;
+        for (e = 0; e < EXTRA_VOICES; e++) {
+            if (sExtra[e].on) {
+                int32_t s = ExtraSample(&sExtra[e]);
+                int32_t l = Mul15(s, VolumeLevel(sExtra[e].start.volumeLeft)) * 2;
+                int32_t r = Mul15(s, VolumeLevel(sExtra[e].start.volumeRight)) * 2;
+                left += l;
+                right += r;
+                if (sExtra[e].start.voice >= HAPTIC_VOICE_FIRST && sExtra[e].start.voice < HAPTIC_VOICE_END) {
+                    hapticL += l;
+                    hapticR += r;
+                }
+            }
         }
     }
     NextCdFrame(&cdL, &cdR);
