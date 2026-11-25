@@ -310,6 +310,9 @@ static void UpdateOverlayContext(void);
 
 static int DisplayHz(void);
 static int sPresentForced = 1; /* the window changed: present even an unchanged picture */
+static int sDriverPaces;       /* presents were found waiting for the display though vsync is off here */
+static int sSlowPresents;      /* presents in a row that took most of a refresh */
+static int sPresenting;        /* this call presents a picture (not skipped as unchanged or early) */
 
 /* Whether this picture is shown: not when nothing changed since the last one shown (a field's end inside a
  * tick, a menu's second field), and with vsync, not before the display's next refresh is due (the
@@ -325,7 +328,7 @@ static int PresentDue(int overlayChanged)
         memcmp(&g_gpuDisplay, &shownDisplay, sizeof(shownDisplay)) == 0) {
         return 0;
     }
-    if (g_settings.vsync && !sPresentForced) {
+    if ((g_settings.vsync || sDriverPaces) && !sPresentForced) {
         interval = 1000000000ull / (Uint64)DisplayHz();
         if (now + interval / 8 < nextNs) {
             return 0; /* the display can't show it before the next one is ready */
@@ -338,8 +341,29 @@ static int PresentDue(int overlayChanged)
     return 1;
 }
 
-/* Converts the display area of video memory to the texture and draws it 4:3 in the window. */
+static void PresentPicture(void);
+
+/* Shows the picture if it is due (PresentDue). Presents that keep waiting most of a refresh mean the driver
+ * holds them to the display (its own vsync setting, forced on): presenting faster than it shows them would
+ * slow the whole game, so from there they are paced to the display as with vsync on. */
 static void Present(void)
+{
+    Uint64 start = SDL_GetTicksNS(), took, interval;
+    PresentPicture();
+    took = SDL_GetTicksNS() - start;
+    interval = 1000000000ull / (Uint64)DisplayHz();
+    if (sPresenting && !g_settings.vsync && !sDriverPaces) {
+        sSlowPresents = took > interval / 2 ? sSlowPresents + 1 : 0;
+        if (sSlowPresents >= 60) {
+            sDriverPaces = 1;
+            fprintf(stderr, "present: the driver waits for the display; pacing to it\n");
+        }
+    }
+    sPresenting = 0;
+}
+
+/* Converts the display area of video memory to the texture and draws it 4:3 in the window. */
+static void PresentPicture(void)
 {
     const GpuDisplay *d = &g_gpuDisplay;
     int w = d->width > 0 ? d->width : 640;
@@ -359,6 +383,7 @@ static void Present(void)
     if (!PresentDue(overlayChanged)) {
         return;
     }
+    sPresenting = 1; /* a picture goes to the display: Present times it */
     OverlayFramePresented();
     if (overlay && overlayChanged && SDL_getenv("DOJO_MENU_AT")) {
         /* A test's look at the overlay: over mid grey, as menu.bmp. */
@@ -703,8 +728,9 @@ static int DisplayHz(void)
  * console frame, a whole number of 30ths. */
 static int ChooseTicksPerFrame(void)
 {
-    int fps = g_settings.fps > 0 ? g_settings.fps : DisplayHz(), ticks;
-    ticks = (fps + 15) / 30;
+    /* A set rate is a multiple of 30 already; Auto takes the most the display shows (144 Hz: 120), as a rate
+     * past the display's is pictures it can't show. */
+    int ticks = g_settings.fps > 0 ? (g_settings.fps + 15) / 30 : DisplayHz() / 30;
     return ticks < 1 ? 1 : (ticks > 16 ? 16 : ticks);
 }
 
@@ -741,6 +767,7 @@ static void ApplySetting(OverlayChange change)
         SDL_SetWindowFullscreen(sWindow, g_settings.fullscreen);
         break;
     case OVERLAY_CHANGE_VSYNC:
+        sDriverPaces = sSlowPresents = 0; /* looked for again */
         if (sVulkan) {
             VkRendererSetVsync(g_settings.vsync);
         } else {
@@ -826,7 +853,9 @@ int main(int argc, char **argv)
         HostFatal("SDL_Init: %s", SDL_GetError());
     }
     /* dojo.ini (a scripted run keeps the defaults), then the environment for this session. */
-    SettingsLoad(SDL_getenv("DOJO_EXIT_FIELD") != NULL || SDL_getenv("DOJO_HIDDEN") != NULL);
+    /* (DOJO_KEEP_SETTINGS: a test of dojo.ini itself reads and writes it all the same) */
+    SettingsLoad((SDL_getenv("DOJO_EXIT_FIELD") != NULL || SDL_getenv("DOJO_HIDDEN") != NULL) &&
+                 !SDL_getenv("DOJO_KEEP_SETTINGS"));
     {
         const char *fps = SDL_getenv("DOJO_FPS");
         const char *scale = SDL_getenv("DOJO_SCALE");

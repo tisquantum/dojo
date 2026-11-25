@@ -1,6 +1,7 @@
 /* The memory cards for the port: each slot is a folder (saves/bu00, saves/bu10) holding one file per save,
  * a whole number of the card's 8 KB blocks as the BIOS allocates them. The card BIOS completes at once, so
- * every request delivers its event before returning, as the game's polling expects. */
+ * every request delivers its events before returning, as the game's polling expects: a read or write both the
+ * BIOS's (SwCARD) and the card's (HwCARD), which the game waits on after an O_NOWAIT transfer. */
 
 #include <direct.h>
 #include <stdio.h>
@@ -106,6 +107,7 @@ long PsxRead(long fd, void *buf, long n)
     }
     got = (long)fread(buf, 1, n, sFiles[fd].file);
     DeliverEvent(SwCARD, EvSpIOE);
+    DeliverEvent(HwCARD, EvSpIOE); /* a read or write with O_NOWAIT is waited on by the card's event */
     return got;
 }
 
@@ -118,6 +120,7 @@ long PsxWrite(long fd, void *buf, long n)
     put = (long)fwrite(buf, 1, n, sFiles[fd].file);
     fflush(sFiles[fd].file);
     DeliverEvent(SwCARD, EvSpIOE);
+    DeliverEvent(HwCARD, EvSpIOE); /* the game's save waits on this one (memcard_io.c WaitHwCardEvent) */
     return put;
 }
 
@@ -133,7 +136,9 @@ long PsxLseek(long fd, long offset, long flag)
 static struct DIRENTRY *FillEntry(struct DIRENTRY *dir)
 {
     memset(dir, 0, sizeof(*dir));
-    strncpy(dir->name, sFind.name, sizeof(dir->name) - 1);
+    /* All of the name's bytes, as the card's directory has them: a 20-character name (the game's own save,
+     * BASCUS-94180BUSHIDO1) fills the field with no end, and the game compares all 20. */
+    strncpy(dir->name, sFind.name, sizeof(dir->name));
     dir->size = (long)sFind.size;
     return dir;
 }

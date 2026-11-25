@@ -116,7 +116,7 @@ The launcher's Settings tab and the in-game options menu (**F1**) change the sam
 
 | Key | Values | |
 |---|---|---|
-| `fps` | `0` (match the display) or 30 to 480 in steps of 30 | The game's rate. `30` is the original exactly. Online, both players run the higher of their two rates. |
+| `fps` | `0` (the most the display shows: 120 at 144 Hz) or 30 to 480 in steps of 30 | The game's rate. `30` is the original exactly. Online, both players run the higher of their two rates. |
 | `aspect` | `auto`, `4:3`, `16:10`, `16:9`, `21:9`, `24:10`, `32:9` | Aspect ratio; `auto` matches the display. |
 | `scale` | 1 to 8 | Resolution as a multiple of the console's 320x240 (Vulkan only). |
 | `software` | 0 / 1 | 1: the software (CPU) renderer instead of Vulkan. |
@@ -232,7 +232,7 @@ stderr), `DOJO_DUMP_DESYNC` (netplay saves its state before a field the two mach
 `desync_p<player>_<field>.bin`), `DOJO_PRESS_TICKS=seed` (the local controller changes from one tick's
 sample to the next, for testing netplay's per-tick input), `DOJO_DUMP_SETTLED=field` and `DOJO_DUMP_WATCH=field`
 (a player's settled state before that field, a spectator's; `all` for every checked field to 600), and
-`DOJO_QUICK_MAX_PING`, `DOJO_FIRST_TO` (those settings, for a test), `DOJO_LOG_FPS` (the frame counter to the log), `DOJO_DISPLAY_HZ` (as if the display ran at that rate), `DOJO_REPLAY=file` (plays a replay from
+`DOJO_QUICK_MAX_PING`, `DOJO_FIRST_TO` (those settings, for a test), `DOJO_LOG_FPS` (the frame counter to the log), `DOJO_DISPLAY_HZ` (as if the display ran at that rate), `DOJO_KEEP_SETTINGS` (a hidden or scripted run reads and writes dojo.ini after all, for testing it), `DOJO_REPLAY=file` (plays a replay from
 `replays/`), `DOJO_HIDDEN` (no window on the screen, the software renderer and the default settings, dojo.ini neither read
 nor written: for tests run while someone uses the machine). Release builds write no PDB, so for
 `tools/statediff.py` build RelWithDebInfo, or the names it gives come from an older build. `tools/statediff.py` compares two dumps variable by variable through the builds' PDBs (pointers by
