@@ -6,6 +6,7 @@
 
 #define SETTINGS_BUTTONS    14 /* the console's buttons, in input.c's INPUT_BUTTONS order */
 #define SETTINGS_BIND_SLOTS 4  /* two gamepad bindings, then two keyboard-and-mouse ones */
+#define SETTINGS_MENU_COMBO 3  /* the gamepad inputs held together to open and close the menu */
 
 typedef struct Settings {
     int fps;        /* the simulation's rate: 0 follows the display, else a multiple of 30 up to 480 */
@@ -24,6 +25,7 @@ typedef struct Settings {
     char pad[2][40];    /* each player's gamepad: "auto", "none" or an SDL GUID */
     char padName[2][64]; /* its name, for showing while it is unplugged */
     int binds[SETTINGS_BUTTONS][SETTINGS_BIND_SLOTS]; /* input.h's bindings for each console button */
+    int menuCombo[SETTINGS_MENU_COMBO]; /* gamepad bindings, all held at once open or close the menu; 0 unused */
     char name[24];  /* the player's name online */
     char server[128]; /* the matchmaking server, host:port */
     int p2pPort;    /* the UDP port a player-to-player match is hosted on */

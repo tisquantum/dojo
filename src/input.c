@@ -83,11 +83,16 @@ static struct {
     char guid[40];
 } sPads[MAX_PADS];
 static int sPadCount;
+static int sMenuHeld[MAX_PADS];      /* the menu's combination held on each gamepad, at its last event */
 static int sPlayerPad[2] = {-1, -1}; /* an index into sPads, or -1 */
 static Haptics sHaptics[2];          /* each player's, while their gamepad is a wired DualSense */
 static Uint64 sHapticsRetry;         /* when to look for a DualSense's sound device again */
 static int sRumbleSent[2] = {-1, -1};
 static Uint64 sRumbleSentAt[2];
+
+static const int sMenuDefault[SETTINGS_MENU_COMBO] = {
+    INPUT_BIND_PAD(SDL_GAMEPAD_BUTTON_LEFT_STICK), INPUT_BIND_PAD(SDL_GAMEPAD_BUTTON_RIGHT_STICK), 0,
+};
 
 void InputDefaultBindings(int button)
 {
@@ -97,6 +102,14 @@ void InputDefaultBindings(int button)
             memcpy(g_settings.binds[i], sDefaults[i], sizeof(sDefaults[i]));
         }
     }
+    if (button < 0) {
+        InputDefaultMenuCombo();
+    }
+}
+
+void InputDefaultMenuCombo(void)
+{
+    memcpy(g_settings.menuCombo, sMenuDefault, sizeof(sMenuDefault));
 }
 
 static int IsChosen(const char *choice)
@@ -148,6 +161,7 @@ void InputDevicesChanged(void)
         SDL_CloseGamepad(sPads[i].pad);
     }
     sPadCount = 0;
+    memset(sMenuHeld, 0, sizeof(sMenuHeld));
     for (i = 0; ids && i < count && sPadCount < MAX_PADS; i++) {
         SDL_Gamepad *pad = SDL_OpenGamepad(ids[i]);
         if (pad) {
@@ -204,6 +218,26 @@ static int BindingHeld(int binding, SDL_Gamepad *pad, const bool *keys, SDL_Mous
     default:
         return 0;
     }
+}
+
+int InputMenuCombo(void)
+{
+    int i, slot, pressed = 0;
+    for (i = 0; i < sPadCount; i++) {
+        int held = 0, used = 0;
+        for (slot = 0; slot < SETTINGS_MENU_COMBO; slot++) {
+            int binding = g_settings.menuCombo[slot];
+            if (binding && (INPUT_BIND_KIND(binding) == INPUT_BIND_PAD(0) ||
+                            INPUT_BIND_KIND(binding) == INPUT_BIND_AXIS(0, 0))) {
+                used++;
+                held += BindingHeld(binding, sPads[i].pad, NULL, 0);
+            }
+        }
+        held = used && held == used;
+        pressed |= held && !sMenuHeld[i];
+        sMenuHeld[i] = held;
+    }
+    return pressed;
 }
 
 unsigned InputButtons(int player)

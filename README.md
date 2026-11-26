@@ -122,7 +122,7 @@ The defaults (every button can be rebound in the launcher's **Controls** tab, or
 | L1 / R1 | Q / E | Shoulder buttons |
 | L2 / R2 | 1 / 3 | Triggers |
 | Start / Select | Enter / Backspace | Start / Back |
-| Options menu | F1 or Esc | Guide button |
+| Options menu | F1 or Esc | Guide button, or L3 + R3 held together (two or three inputs of your choice: the launcher's Controls tab) |
 | Go back, leave a queue or a match | Hold Backspace for 2 seconds | Hold Back for 2 seconds |
 | Full screen | F11 | |
 
@@ -163,6 +163,7 @@ The launcher's Settings tab and the in-game options menu (**F1**) change the sam
 | `pad1`, `pad2` | `auto`, `none` or an SDL GUID | Each player's gamepad (`pad1_name`, `pad2_name`: its name). |
 | `keyboard_player` | 1 / 2 | The player the keyboard and mouse belong to. |
 | `bind_cross` ... `bind_right` | four hex numbers | Two gamepad, then two keyboard-and-mouse bindings (`src/input.h`); 0 is none. |
+| `menu_combo` | three hex numbers | The gamepad inputs held together to open and close the options menu (`src/input.h` bindings; 0 leaves a slot out, all 0 turns it off). L3 + R3 by default: `30007 30008 0`. |
 | `name` | letters, digits, `_`, `-` | Your name online. |
 | `server` | `host:port` | The matchmaking server. The official one is `dojo-matchmaker.fly.dev:7777`. |
 | `offline` | 0 / 1 | 1: never contact the server (direct matches still work). |
@@ -248,7 +249,7 @@ machines play online with rollback, at different refresh rates too.
 
 ### Options, online and testing in detail
 
-Options: **F1** (or Esc, or a gamepad's guide button) opens the options menu over the game, which waits
+Options: **F1** (or Esc, a gamepad's guide button, or its menu combination, L3 + R3 by default) opens the options menu over the game, which waits
 while it is open (online it runs on). Frame rate, resolution, full screen, vsync, volume and a frame counter
 apply at once; aspect ratio and renderer on the next start; online the frame rate is the match's. Settings are
 kept in `dojo.ini` beside the executable. Environment variables set them for one session:

@@ -363,6 +363,9 @@ DEFAULT_BINDS = [[PAD | 0, 0, KEY | 27, 0], [PAD | 1, 0, KEY | 6, 0], [PAD | 2, 
                  [AXIS | 8, 0, KEY | 30, 0], [AXIS | 10, 0, KEY | 32, 0], [PAD | 6, 0, KEY | 40, 0],
                  [PAD | 4, 0, KEY | 42, 0], [PAD | 11, 0, KEY | 82, 0], [PAD | 12, 0, KEY | 81, 0],
                  [PAD | 13, 0, KEY | 80, 0], [PAD | 14, 0, KEY | 79, 0]]
+# The gamepad inputs held together to open and close the game's menu (input.c): L3 and R3.
+MENU = "menu"
+DEFAULT_MENU_COMBO = [PAD | 7, PAD | 8, 0]
 
 
 class Gamepads:
@@ -518,10 +521,15 @@ def binding_name(binding, pad_type):
     return "None"
 
 
+def key_cell(button, slot):
+    """Whether a bindings cell takes a key or a click (a button's last two), not a gamepad's input."""
+    return button != MENU and slot >= 2
+
+
 def load_controls():
     """Each player's gamepad and the bindings, from dojo.ini (the game's defaults where it has none)."""
     controls = {"pad1": "auto", "pad2": "auto", "pad1_name": "", "pad2_name": "",
-                "binds": [list(b) for b in DEFAULT_BINDS]}
+                "binds": [list(b) for b in DEFAULT_BINDS], MENU: list(DEFAULT_MENU_COMBO)}
     keys = {"bind_" + key: i for i, (_, key) in enumerate(BUTTONS)}
     try:
         with open(INI, encoding="utf-8", errors="replace") as f:
@@ -538,6 +546,13 @@ def load_controls():
                         continue
                     if len(binds) == 4:
                         controls["binds"][keys[key]] = binds
+                elif key == "menu_combo":
+                    try:
+                        combo = [int(v, 16) for v in value.split()]
+                    except ValueError:
+                        continue
+                    if len(combo) == 3:
+                        controls[MENU] = combo
     except OSError:
         pass
     return controls
@@ -549,6 +564,7 @@ def save_controls(controls):
              "pad2_name": controls["pad2_name"]}
     for i, (_, key) in enumerate(BUTTONS):
         lines["bind_" + key] = " ".join("%x" % b for b in controls["binds"][i])
+    lines["menu_combo"] = " ".join("%x" % b for b in controls[MENU])
     out = []
     try:
         with open(INI, encoding="utf-8", errors="replace") as f:
@@ -1426,14 +1442,41 @@ class Launcher:
                 self.cells[(b, slot)] = cell
             ttk.Button(table, text="Reset", width=6, command=lambda b=b: self.reset_bindings(b)).grid(
                 row=2 + b, column=5, padx=(6, 0))
+
+        # The menu's gamepad combination: two or three inputs held together (an empty cell is left out).
+        menu = ttk.Frame(tab)
+        menu.grid(row=3, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(menu, text="Menu on a gamepad", style="Section.TLabel").grid(row=0, column=0, columnspan=5,
+                                                                                sticky="w")
+        ttk.Label(menu, text="Held together").grid(row=1, column=0, sticky="w", padx=(0, 16))
+        for slot in range(3):
+            if slot:
+                ttk.Label(menu, text="+").grid(row=1, column=2 * slot)
+            cell = tk.Label(menu, width=14, background=FIELD, foreground=PAPER, font=("Segoe UI", 10),
+                            padx=4, pady=3, cursor="hand2")
+            cell.grid(row=1, column=1 + 2 * slot, padx=2, pady=2)
+            cell.bind("<Button-1>", lambda e, s=slot: self.cell_clicked(e, MENU, s))
+            cell.bind("<Button-3>", lambda _, s=slot: self.clear_cell(MENU, s))
+            cell.bind("<Enter>", lambda _, c=cell: c.configure(background=FIELD_HOVER)
+                      if c.cget("background") == FIELD else None)
+            cell.bind("<Leave>", lambda _, c=cell: c.configure(background=FIELD)
+                      if c.cget("background") == FIELD_HOVER else None)
+            self.cells[(MENU, slot)] = cell
+        ttk.Button(menu, text="Reset", width=6, command=lambda: self.reset_bindings(MENU)).grid(
+            row=1, column=6, padx=(6, 0))
+        ttk.Label(menu, text="Opens and closes the game's menu, as F1 does (the gamepad's guide button does too). "
+                  "L3 + R3 to begin with; a third input makes it harder to press by accident.",
+                  style="Sub.TLabel", wraplength=640).grid(row=2, column=0, columnspan=7, sticky="w")
+
         foot = ttk.Frame(tab)
-        foot.grid(row=3, column=0, sticky="w", pady=(10, 0))
+        foot.grid(row=4, column=0, sticky="w", pady=(10, 0))
         ttk.Button(foot, text="Reset all bindings", command=lambda: self.reset_bindings(None)).pack(side="left")
         ttk.Label(foot, text="Click a cell, then press the key, mouse button or gamepad button for it. Right-click "
                   "clears it.", style="Sub.TLabel", wraplength=480).pack(side="left", padx=(12, 0))
-        ttk.Label(tab, text="Also in the game: F1, Controls. In the game, F1 or Esc opens the menu; holding Backspace "
-                  "(or the gamepad's back button) for 2 seconds goes back; F11 switches full screen.",
-                  style="Sub.TLabel", wraplength=640).grid(row=4, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(tab, text="Also in the game: F1, Controls. In the game, F1 or Esc (or the gamepad's combination "
+                  "above) opens the menu; holding Backspace (or the gamepad's back button) for 2 seconds goes back; "
+                  "F11 switches full screen.",
+                  style="Sub.TLabel", wraplength=640).grid(row=5, column=0, sticky="w", pady=(12, 0))
 
         tab.bind_all("<KeyPress>", self.key_pressed, add="+")
         self.gamepads = Gamepads()
@@ -1465,9 +1508,9 @@ class Launcher:
     def refresh_cells(self):
         kind = self.pad_type()
         for (b, slot), cell in self.cells.items():
-            binding = self.controls["binds"][b][slot]
+            binding = self.controls[MENU][slot] if b == MENU else self.controls["binds"][b][slot]
             if self.capturing == (b, slot):
-                cell.configure(text="Press a gamepad button..." if slot < 2 else "Press a key or click...",
+                cell.configure(text="Press a key or click..." if key_cell(b, slot) else "Press a gamepad button...",
                                background=CRIMSON, foreground="#ffffff")
             else:
                 cell.configure(text=binding_name(binding, kind), background=FIELD,
@@ -1555,7 +1598,7 @@ class Launcher:
         runs (it has them), the launcher lets go of them."""
         if self.gamepads.available():
             if self.tabs.select() == str(self.controls_tab) and not self.game_running():
-                if self.capturing is None or self.capturing[1] >= 2:
+                if self.capturing is None or key_cell(*self.capturing):
                     self.show_pads(self.gamepads.list())
             elif self.gamepads.open:
                 self.gamepads.close()
@@ -1608,7 +1651,7 @@ class Launcher:
 
     def set_binding(self, button, slot, binding):
         self.capturing = None
-        self.controls["binds"][button][slot] = binding
+        (self.controls[MENU] if button == MENU else self.controls["binds"][button])[slot] = binding
         save_controls(self.controls)
         self.refresh_cells()
 
@@ -1618,19 +1661,21 @@ class Launcher:
         for b in range(len(BUTTONS)):
             if button is None or b == button:
                 self.controls["binds"][b] = list(DEFAULT_BINDS[b])
+        if button in (None, MENU):
+            self.controls[MENU] = list(DEFAULT_MENU_COMBO)
         save_controls(self.controls)
         self.refresh_cells()
 
     def clear_cell(self, button, slot):
-        if self.capturing is None or self.capturing[1] < 2:
+        if self.capturing is None or not key_cell(*self.capturing):
             self.set_binding(button, slot, 0)   # (while a keyboard cell waits, a right-click is its binding)
 
     def cell_clicked(self, event, button, slot):
-        if self.capturing is not None and self.capturing[1] >= 2:
+        if self.capturing is not None and key_cell(*self.capturing):
             return   # a keyboard cell is waiting: this click is its binding (mouse_pressed)
         self.capturing = (button, slot)
         self.refresh_cells()
-        if slot >= 2:
+        if key_cell(button, slot):
             # the next key, or a click anywhere in the window
             self.root.after(150, lambda: self.root.bind_all("<ButtonPress>", self.mouse_pressed, add="+"))
             return
@@ -1674,13 +1719,13 @@ class Launcher:
 
     def mouse_pressed(self, event):
         self.root.unbind_all("<ButtonPress>")
-        if self.capturing is None or self.capturing[1] < 2:
+        if self.capturing is None or not key_cell(*self.capturing):
             return
         if event.num in MOUSE_BUTTONS:
             self.set_binding(self.capturing[0], self.capturing[1], MOUSE | MOUSE_BUTTONS[event.num])
 
     def key_pressed(self, event):
-        if self.capturing is None or self.capturing[1] < 2:
+        if self.capturing is None or not key_cell(*self.capturing):
             return
         button, slot = self.capturing
         self.root.unbind_all("<ButtonPress>")

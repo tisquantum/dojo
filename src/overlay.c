@@ -626,7 +626,14 @@ static void BackUp(void)
 
 int OverlayHandleEvent(const SDL_Event *e)
 {
+    /* The menu's gamepad combination (L3 and R3 by default) opens and closes it, as F1 does. */
+    int combo = (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e->type == SDL_EVENT_GAMEPAD_BUTTON_UP ||
+                 e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION) && InputMenuCombo();
     if (sOpen && sCaptureSince && Capture(e)) {
+        return 1;
+    }
+    if (combo) {
+        SetOpen(!sOpen);
         return 1;
     }
     if (e->type == SDL_EVENT_KEY_DOWN || e->type == SDL_EVENT_KEY_UP) {

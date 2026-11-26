@@ -11,7 +11,7 @@ const char *const SETTINGS_ASPECTS[SETTINGS_ASPECT_COUNT] = {"auto", "4:3", "16:
 const char *const SETTINGS_DOWNSAMPLES[SETTINGS_DOWNSAMPLE_COUNT] = {"off", "smooth", "native"};
 const char *const SETTINGS_CRTS[SETTINGS_CRT_COUNT] = {"off", "scanlines", "aperture", "mask"};
 
-Settings g_settings = {0, 4, SETTINGS_ASPECT_AUTO, 0, 0, 0, 100, 0, 0, 50, 100, 1, 0, {"auto", "auto"}, {"", ""}, {{0}},
+Settings g_settings = {0, 4, SETTINGS_ASPECT_AUTO, 0, 0, 0, 100, 0, 0, 50, 100, 1, 0, {"auto", "auto"}, {"", ""}, {{0}}, {0},
                        "", "dojo-matchmaker.fly.dev:7777", 7778, 1, 0, -1, 160, 0};
 
 static int sScripted;
@@ -135,6 +135,14 @@ void SettingsLoad(int scripted)
             }
             continue;
         }
+        if (strcmp(key, "menu_combo") == 0) {
+            /* up to three gamepad bindings in hex, 0 for none */
+            int *c = g_settings.menuCombo;
+            if (sscanf(value, "%x %x %x", (unsigned *)&c[0], (unsigned *)&c[1], (unsigned *)&c[2]) != 3) {
+                InputDefaultMenuCombo();
+            }
+            continue;
+        }
         for (i = 0; i < sizeof(sChoices) / sizeof(sChoices[0]); i++) {
             if (strcmp(key, sChoices[i].key) == 0) {
                 int c;
@@ -193,5 +201,7 @@ void SettingsSave(void)
         const int *b = g_settings.binds[i];
         fprintf(f, "bind_%s = %x %x %x %x\n", INPUT_BUTTONS[i].key, b[0], b[1], b[2], b[3]);
     }
+    fprintf(f, "; The gamepad inputs held together to open or close the menu, 0 for none.\n");
+    fprintf(f, "menu_combo = %x %x %x\n", g_settings.menuCombo[0], g_settings.menuCombo[1], g_settings.menuCombo[2]);
     fclose(f);
 }
