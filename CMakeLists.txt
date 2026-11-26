@@ -5,11 +5,15 @@
 # port builds a 32-bit executable linked at a fixed base low enough that every address fits 24 bits.
 #
 # It builds with the self-contained toolchain in toolchain/ (tools/fetch_toolchain.py fetches it; the release
-# ships it): llvm-mingw for 32-bit x86, CMake, Ninja, Python, SDL3, the Vulkan headers and glslang. Everyone
-# building with the same tools makes the same program, which online play relies on.
+# ships it): for Windows, llvm-mingw for 32-bit x86; for Linux, Zig (Clang, the linker and glibc's headers and
+# stubs for 32-bit x86); and CMake, Ninja, Python (Windows; Linux has its own), SDL3, the Vulkan headers and
+# glslang. Everyone building with the same tools makes the same program, which online play relies on.
 #
 #   toolchain/cmake/bin/cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 #   toolchain/cmake/bin/cmake --build build
+#
+# DOJO_PLATFORM picks the system the game is built for: the one building it, unless set (a Windows machine
+# can build the Linux game with a Linux toolchain's Zig, SDL3 and glslang swapped for their Windows builds).
 
 cmake_minimum_required(VERSION 3.20)
 
@@ -17,9 +21,51 @@ set(DOJO_TOOLCHAIN "${CMAKE_CURRENT_SOURCE_DIR}/toolchain" CACHE PATH "The self-
 if(NOT EXISTS "${DOJO_TOOLCHAIN}/TOOLCHAIN_VERSION")
     message(FATAL_ERROR "No toolchain in ${DOJO_TOOLCHAIN}: run tools/fetch_toolchain.py")
 endif()
-set(CMAKE_C_COMPILER "${DOJO_TOOLCHAIN}/llvm-mingw/bin/i686-w64-mingw32-clang.exe" CACHE FILEPATH "" FORCE)
+if(CMAKE_HOST_WIN32)
+    set(HOST_EXE ".exe")
+    set(DOJO_DEFAULT_PLATFORM windows)
+else()
+    set(HOST_EXE "")
+    set(DOJO_DEFAULT_PLATFORM linux)
+endif()
+set(DOJO_PLATFORM ${DOJO_DEFAULT_PLATFORM} CACHE STRING "The system the game is built for: windows or linux")
 if(NOT CMAKE_MAKE_PROGRAM)
-    set(CMAKE_MAKE_PROGRAM "${DOJO_TOOLCHAIN}/ninja/ninja.exe" CACHE FILEPATH "")
+    set(CMAKE_MAKE_PROGRAM "${DOJO_TOOLCHAIN}/ninja/ninja${HOST_EXE}" CACHE FILEPATH "")
+endif()
+if(DOJO_PLATFORM STREQUAL "windows")
+    set(CMAKE_C_COMPILER "${DOJO_TOOLCHAIN}/llvm-mingw/bin/i686-w64-mingw32-clang.exe" CACHE FILEPATH "" FORCE)
+elseif(DOJO_PLATFORM STREQUAL "linux")
+    # Zig's C compiler for 32-bit x86 Linux, through small scripts CMake can take as its tools. The glibc it
+    # links against is an old one, so the game runs on any distribution since; the CPU is fixed rather than
+    # the building machine's. Zig's own caches stay in the build folder.
+    set(CMAKE_SYSTEM_NAME Linux)
+    set(CMAKE_SYSTEM_PROCESSOR i686)
+    set(ZIG "${DOJO_TOOLCHAIN}/zig/zig${HOST_EXE}")
+    set(ZIG_CACHE "${CMAKE_BINARY_DIR}/zig-cache")
+    foreach(tool cc ar ranlib)
+        if(tool STREQUAL "cc")
+            set(tool_args "cc -target x86-linux-gnu.2.31 -mcpu=pentium4 -fno-sanitize=all")
+        else()
+            set(tool_args "${tool}")
+        endif()
+        if(CMAKE_HOST_WIN32)
+            set(wrapper "${CMAKE_BINARY_DIR}/zig-${tool}.cmd")
+            file(WRITE ${wrapper} "@set ZIG_GLOBAL_CACHE_DIR=${ZIG_CACHE}\r\n@set ZIG_LOCAL_CACHE_DIR=${ZIG_CACHE}\r\n"
+                "@\"${ZIG}\" ${tool_args} %*\r\n")
+        else()
+            set(wrapper "${CMAKE_BINARY_DIR}/zig-${tool}")
+            file(WRITE ${wrapper} "#!/bin/sh\nexport ZIG_GLOBAL_CACHE_DIR='${ZIG_CACHE}' ZIG_LOCAL_CACHE_DIR='${ZIG_CACHE}'\n"
+                "exec '${ZIG}' ${tool_args} \"$@\"\n")
+            file(CHMOD ${wrapper} PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
+                 WORLD_READ WORLD_EXECUTE)
+        endif()
+        set(ZIG_${tool} ${wrapper})
+    endforeach()
+    set(CMAKE_C_COMPILER "${ZIG_cc}" CACHE FILEPATH "" FORCE)
+    set(CMAKE_AR "${ZIG_ar}" CACHE FILEPATH "" FORCE)
+    set(CMAKE_RANLIB "${ZIG_ranlib}" CACHE FILEPATH "" FORCE)
+else()
+    message(FATAL_ERROR "DOJO_PLATFORM is windows or linux, not ${DOJO_PLATFORM}")
 endif()
 project(dojo_pc C)
 
@@ -33,7 +79,9 @@ set(REPO_ROOT ${DOJO_DECOMP_DIR})
 set(DOJO_DISC "${REPO_ROOT}/game_files/Bushido Blade (USA).bin" CACHE FILEPATH
     "The player's disc image; the build takes the loading-screen picture from its executable")
 
-set(Python3_EXECUTABLE "${DOJO_TOOLCHAIN}/python/python.exe" CACHE FILEPATH "")
+if(CMAKE_HOST_WIN32)
+    set(Python3_EXECUTABLE "${DOJO_TOOLCHAIN}/python/python.exe" CACHE FILEPATH "")
+endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # The loading-screen picture the source includes from the player's own executable.
@@ -47,12 +95,14 @@ add_custom_command(
     COMMENT "Extracting the loading-screen picture from the disc image")
 add_custom_target(game_assets DEPENDS ${GENERATED_DIR}/content/now_loading.inc)
 
-# Debug information as a PDB (CodeView), which crash reports (llvm-symbolizer) and tools/statediff.py read.
-add_compile_options($<$<CONFIG:RelWithDebInfo,Debug>:-gcodeview>)
-add_link_options($<$<CONFIG:RelWithDebInfo,Debug>:-Wl,--pdb=> "LINKER:-Xlink=-pdbaltpath:%_PDB%")
-# Reproducible: the same program wherever it is built (no timestamp, no folder names), so two players' builds
-# are the same bytes.
-add_link_options(-Wl,--no-insert-timestamp)
+if(DOJO_PLATFORM STREQUAL "windows")
+    # Debug information as a PDB (CodeView), which crash reports (llvm-symbolizer) and tools/statediff.py read.
+    add_compile_options($<$<CONFIG:RelWithDebInfo,Debug>:-gcodeview>)
+    add_link_options($<$<CONFIG:RelWithDebInfo,Debug>:-Wl,--pdb=> "LINKER:-Xlink=-pdbaltpath:%_PDB%")
+    # Reproducible: the same program wherever it is built (no timestamp, no folder names), so two players'
+    # builds are the same bytes.
+    add_link_options(-Wl,--no-insert-timestamp)
+endif()
 add_compile_options(-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=dojo -ffile-prefix-map=${DOJO_DECOMP_DIR}=decomp
     -ffile-prefix-map=${CMAKE_CURRENT_BINARY_DIR}=build)
 
@@ -130,20 +180,31 @@ target_compile_definitions(dojo_lib PRIVATE TARGET_PC)
 # of them uses floating point, so without SSE a block copy is plain 32-bit moves.
 target_compile_options(dojo_lib PRIVATE ${PSX_C_FLAGS} ${SIM_SECTIONS} -fno-vectorize -fno-slp-vectorize -mno-sse)
 
-# SDL3, the window, input and audio (the toolchain's mingw development package), the Vulkan headers (the entry
-# points are loaded at run time through SDL, so nothing more is needed to link), and glslang for the shaders.
-set(SDL3_DIR ${DOJO_TOOLCHAIN}/deps/SDL3/i686-w64-mingw32)
+# SDL3, the window, input and audio (the toolchain's mingw development package, or for Linux Debian's 32-bit
+# one), the Vulkan headers (the entry points are loaded at run time through SDL, so nothing more is needed to
+# link), and glslang for the shaders.
 add_library(SDL3 SHARED IMPORTED)
-set_target_properties(SDL3 PROPERTIES
-    IMPORTED_LOCATION ${SDL3_DIR}/bin/SDL3.dll
-    IMPORTED_IMPLIB ${SDL3_DIR}/lib/libSDL3.dll.a
-    INTERFACE_INCLUDE_DIRECTORIES ${SDL3_DIR}/include)
+if(DOJO_PLATFORM STREQUAL "windows")
+    set(SDL3_DIR ${DOJO_TOOLCHAIN}/deps/SDL3/i686-w64-mingw32)
+    set(SDL3_RUNTIME ${SDL3_DIR}/bin/SDL3.dll)
+    set_target_properties(SDL3 PROPERTIES
+        IMPORTED_LOCATION ${SDL3_RUNTIME}
+        IMPORTED_IMPLIB ${SDL3_DIR}/lib/libSDL3.dll.a
+        INTERFACE_INCLUDE_DIRECTORIES ${SDL3_DIR}/include)
+else()
+    set(SDL3_DIR ${DOJO_TOOLCHAIN}/deps/SDL3/i686-linux-gnu)
+    set(SDL3_RUNTIME ${SDL3_DIR}/lib/libSDL3.so.0)
+    set_target_properties(SDL3 PROPERTIES
+        IMPORTED_LOCATION ${SDL3_RUNTIME}
+        IMPORTED_SONAME libSDL3.so.0
+        INTERFACE_INCLUDE_DIRECTORIES ${SDL3_DIR}/include)
+endif()
 set(VULKAN_HEADERS_DIR ${DOJO_TOOLCHAIN}/deps/Vulkan-Headers)
-set(SHADER_COMPILER ${DOJO_TOOLCHAIN}/deps/glslang/bin/glslang.exe)
+set(SHADER_COMPILER ${DOJO_TOOLCHAIN}/deps/glslang/bin/glslang${HOST_EXE})
 
 # Each shader becomes a header holding its SPIR-V as an array, spv_<name>_<stage>.
 set(SHADER_HEADERS)
-foreach(shader draw.vert draw.frag quad.vert paint.frag present.frag overlay.frag)
+foreach(shader draw.vert draw.frag quad.vert paint.frag downsample.frag present.frag overlay.frag)
     string(REPLACE "." "_" shader_name ${shader})
     set(shader_header ${GENERATED_DIR}/shaders/${shader_name}.h)
     set(shader_command ${SHADER_COMPILER} -V --target-env vulkan1.3 --vn spv_${shader_name} -o ${shader_header}
@@ -173,15 +234,34 @@ target_include_directories(dojo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/sdk/include 
     ${GENERATED_DIR} ${VULKAN_HEADERS_DIR}/include)
 target_compile_definitions(dojo PRIVATE TARGET_PC _CRT_SECURE_NO_WARNINGS)
 target_compile_options(dojo PRIVATE -std=gnu11 -fno-strict-aliasing -fwrapv -fno-omit-frame-pointer)
-target_link_libraries(dojo PRIVATE dojo_game dojo_lib SDL3 ws2_32)
 add_custom_command(TARGET dojo POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SDL3_DIR}/bin/SDL3.dll $<TARGET_FILE_DIR:dojo>)
-# Fixed at 0x400000 with no relocations (every address the game sees fits 24 bits), above 2 GB too (the console's
-# memory is mapped at 0x80000000), and the runtime linked in, so the program needs only Windows and SDL3.dll.
-target_link_options(dojo PRIVATE
-    -Wl,--image-base,0x400000
-    -Wl,--disable-dynamicbase
-    -Wl,--disable-reloc-section
-    -Wl,--large-address-aware
-    -Wl,--error-limit=0
-    -static)
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SDL3_RUNTIME} $<TARGET_FILE_DIR:dojo>)
+if(DOJO_PLATFORM STREQUAL "windows")
+    target_link_libraries(dojo PRIVATE dojo_game dojo_lib SDL3 ws2_32)
+    # Fixed at 0x400000 with no relocations (every address the game sees fits 24 bits), above 2 GB too (the
+    # console's memory is mapped at 0x80000000), and the runtime linked in, so the program needs only Windows
+    # and SDL3.dll.
+    target_link_options(dojo PRIVATE
+        -Wl,--image-base,0x400000
+        -Wl,--disable-dynamicbase
+        -Wl,--disable-reloc-section
+        -Wl,--large-address-aware
+        -Wl,--error-limit=0
+        -static)
+else()
+    target_link_libraries(dojo PRIVATE dojo_game dojo_lib SDL3 pthread)
+    # Fixed at 0x400000, not position-independent (every address the game sees fits 24 bits; a 32-bit program
+    # on a 64-bit kernel has all 4 GB, the console's memory at 0x80000000 among them), the simulation's
+    # sections gathered (linux.ld), and libSDL3.so.0 found beside the program.
+    set_target_properties(dojo PROPERTIES INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH TRUE)
+    target_compile_options(dojo PRIVATE -fno-pie)
+    target_link_options(dojo PRIVATE
+        -no-pie
+        -Wl,--image-base=0x400000
+        -T ${CMAKE_CURRENT_SOURCE_DIR}/linux.ld
+        # (Zig's C runtime carries debug information naming the folder Zig is in: a release build leaves it
+        # out, so the program is the same bytes wherever it was built)
+        $<$<CONFIG:Release>:-Wl,--strip-debug>)
+    target_compile_options(dojo_game PRIVATE -fno-pie)
+    target_compile_options(dojo_lib PRIVATE -fno-pie)
+endif()

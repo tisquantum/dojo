@@ -32,12 +32,24 @@ typedef struct Settings {
     int onlineDelay; /* online input delay in fields: -1 picks the least the connection allows */
     int quickMaxPing; /* quick play turns down an opponent further than this (ms, 0: any) for its first 30 s */
     int firstTo;    /* an online set's length: the first to win this many bouts (0: no end) */
+    /* The rules (pc_rules.h); online, each holds only when both players have it on. */
+    int fixBugs;    /* the original game's bugs fixed */
+    int extras;     /* what the disc holds that play never reached */
+    int jpBlood;    /* the Japanese release's semi-transparent amber blood */
+    /* How the picture is shown (the Vulkan renderer's): see SETTINGS_DOWNSAMPLES and SETTINGS_CRTS. */
+    int downsample; /* 0 as drawn, 1 smoothed to the window (supersampled), 2 the console's resolution */
+    int crt;        /* 0 none, 1 scanlines, 2 aperture grille, 3 shadow mask */
+    int crtCurvature; /* the CRT's glass curved */
 } Settings;
 
 #define SETTINGS_ASPECT_COUNT 7
 #define SETTINGS_ASPECT_AUTO 0 /* the display's own shape */
 #define SETTINGS_ASPECT_16_9 3
 extern const char *const SETTINGS_ASPECTS[SETTINGS_ASPECT_COUNT]; /* "auto", "4:3", "16:9", ... */
+#define SETTINGS_DOWNSAMPLE_COUNT 3
+extern const char *const SETTINGS_DOWNSAMPLES[SETTINGS_DOWNSAMPLE_COUNT]; /* "off", "smooth", "native" */
+#define SETTINGS_CRT_COUNT 4
+extern const char *const SETTINGS_CRTS[SETTINGS_CRT_COUNT]; /* "off", "scanlines", "aperture", "mask" */
 
 extern Settings g_settings;
 

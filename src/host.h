@@ -28,5 +28,7 @@ void HostResetPacing(void);
 void HostSetSimulationMargin(int margin);
 int HostOwnMargin(void);
 int HostOwnTicksPerFrame(void);
+/* The rules (pc_rules.h) this machine's settings ask for. */
+int HostOwnRules(void);
 
 #endif

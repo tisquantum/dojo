@@ -3,10 +3,87 @@
  * every request delivers its events before returning, as the game's polling expects: a read or write both the
  * BIOS's (SwCARD) and the card's (HwCARD), which the game waits on after an O_NOWAIT transfer. */
 
-#include <direct.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef _WIN32
+#include <direct.h>
 #include <io.h>
+#define MakeFolder(path) _mkdir(path)
+#else
+#include <dirent.h>
+#include <fnmatch.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#define MakeFolder(path) mkdir(path, 0777)
+#define _access access
+
+/* The part of the Windows runtime's _findfirst the card uses, over a directory listing and fnmatch (whose
+ * '?' and '*' are the BIOS's too): one search open at a time per handle. */
+#define _A_SUBDIR 0x10
+struct _finddata_t {
+    unsigned attrib;
+    long size;
+    char name[260];
+};
+typedef struct FindState {
+    DIR *dir;
+    char folder[260], pattern[260];
+} FindState;
+
+static int _findnext(intptr_t handle, struct _finddata_t *f)
+{
+    FindState *s = (FindState *)handle;
+    struct dirent *e;
+    while ((e = readdir(s->dir)) != NULL) {
+        char path[600];
+        struct stat st;
+        if (e->d_name[0] == '.' || fnmatch(s->pattern, e->d_name, 0) != 0) {
+            continue;
+        }
+        snprintf(path, sizeof(path), "%s/%s", s->folder, e->d_name);
+        if (stat(path, &st) != 0) {
+            continue;
+        }
+        f->attrib = S_ISDIR(st.st_mode) ? _A_SUBDIR : 0;
+        f->size = (long)st.st_size;
+        snprintf(f->name, sizeof(f->name), "%s", e->d_name);
+        return 0;
+    }
+    return -1;
+}
+
+static int _findclose(intptr_t handle)
+{
+    FindState *s = (FindState *)handle;
+    closedir(s->dir);
+    free(s);
+    return 0;
+}
+
+static intptr_t _findfirst(const char *spec, struct _finddata_t *f)
+{
+    FindState *s = calloc(1, sizeof(*s));
+    const char *slash = strrchr(spec, '/');
+    if (!s || !slash) {
+        free(s);
+        return -1;
+    }
+    snprintf(s->folder, sizeof(s->folder), "%.*s", (int)(slash - spec), spec);
+    snprintf(s->pattern, sizeof(s->pattern), "%s", slash + 1);
+    s->dir = opendir(s->folder);
+    if (!s->dir) {
+        free(s);
+        return -1;
+    }
+    if (_findnext((intptr_t)s, f) != 0) {
+        _findclose((intptr_t)s);
+        return -1;
+    }
+    return (intptr_t)s;
+}
+#endif
 #include <kernel.h>
 #include "netplay.h"
 
@@ -42,8 +119,8 @@ static int HostPath(const char *devname, char *out, size_t size, char *dir, size
         return 0;
     }
     snprintf(dir, dirSize, "saves/%.*s", (int)(colon - devname), devname);
-    _mkdir("saves");
-    _mkdir(dir);
+    MakeFolder("saves");
+    MakeFolder(dir);
     snprintf(out, size, "%s/%s", dir, colon + 1);
     return 1;
 }

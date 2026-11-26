@@ -18,6 +18,10 @@
  * renderer draws exists only in the surfaces until the game reads it back or samples it as a texture: each
  * surface keeps the box it has drawn into, and such reads bring that box down to g_vram first.
  *
+ * Display. The shown picture goes to the window in one of the display modes (present.frag): as drawn,
+ * smoothed (supersampled down to the window), or from a copy brought down to the console's resolution
+ * (downsample.frag) as sharp pixels or one of the CRT looks.
+ *
  * Frames. Commands are recorded into one command buffer between presents; uploads and readbacks interrupt
  * the rendering for transfers, behind full barriers. A present, and any readback, submits and waits, so the
  * vertex and upload rings start empty after each. The workload is a console's: waiting costs nothing. */
@@ -37,6 +41,7 @@
 #include "shaders/draw_frag.h"
 #include "shaders/quad_vert.h"
 #include "shaders/paint_frag.h"
+#include "shaders/downsample_frag.h"
 #include "shaders/present_frag.h"
 #include "shaders/overlay_frag.h"
 
@@ -77,7 +82,17 @@ VK_DEVICE_FUNCTIONS(DECLARE)
 #define UPLOAD_RING_BYTES  (16u << 20)
 #define MAX_SWAPCHAIN_IMAGES 8
 
-enum { PIPE_OPAQUE, PIPE_SEMI0, PIPE_SEMI1, PIPE_SEMI2, PIPE_SEMI3, PIPE_PAINT, PIPE_PRESENT, PIPE_OVERLAY, PIPE_COUNT };
+enum {
+    PIPE_OPAQUE, PIPE_SEMI0, PIPE_SEMI1, PIPE_SEMI2, PIPE_SEMI3, PIPE_PAINT, PIPE_DOWNSAMPLE, PIPE_PRESENT,
+    PIPE_SHOWN, PIPE_OVERLAY, PIPE_COUNT
+};
+
+/* present.frag's display modes. */
+enum { DISPLAY_BILINEAR, DISPLAY_SMOOTH, DISPLAY_SHARP, DISPLAY_SCANLINES, DISPLAY_APERTURE, DISPLAY_MASK };
+
+/* The picture at the console's resolution: the widest display with the widest margins, and 480 lines. */
+#define NATIVE_WIDTH  (VRAM_WIDTH + 2 * 640)
+#define NATIVE_HEIGHT 480
 
 typedef struct Vertex {
     float x, y;
@@ -89,6 +104,7 @@ typedef struct Vertex {
 typedef struct Push {
     float rect[4];
     float extra[4];
+    float params[4]; /* present.frag's: the display mode, the curvature, the picture's size in pixels */
 } Push;
 
 typedef struct Image {
@@ -139,6 +155,10 @@ static struct {
     Surface surfaces[SURFACE_COUNT];
     Image display24;         /* a 24-bit display, converted on the CPU */
     VkDescriptorSet display24Set;
+    Image native;            /* the shown picture at the console's resolution (downsample.frag) */
+    VkDescriptorSet nativeSet;
+    int downsample, crt, curvature; /* the display settings (VkRendererSetDisplay) */
+    Image shown;             /* the picture as shown, for a test's capture (VkRendererCaptureShown) */
     Image overlay;           /* the options overlay (overlay.h), laid over the window */
     VkDescriptorSet overlaySet;
     const uint32_t *overlayPixels; /* NULL: none shown */
@@ -949,7 +969,7 @@ int VkRendererInit(SDL_Window *window, int scale, int margin)
     VkDescriptorPoolCreateInfo descPoolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     VkDescriptorPool descPool;
     VkDescriptorSetAllocateInfo setInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    VkShaderModule drawVert, drawFrag, quadVert, paintFrag, presentFrag, overlayFrag;
+    VkShaderModule drawVert, drawFrag, quadVert, paintFrag, downsampleFrag, presentFrag, overlayFrag;
     static const int fbRects[SURFACE_COUNT][4] = {{0, 0, 1024, 512}, {0, 0, 640, 240}, {0, 240, 640, 240}};
     uint32_t readbackBytes;
     VkClearColorValue black;
@@ -1051,6 +1071,8 @@ int VkRendererInit(SDL_Window *window, int scale, int margin)
                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     CreateImage(&V.overlay, OVERLAY_WIDTH, OVERLAY_HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    CreateImage(&V.native, NATIVE_WIDTH, NATIVE_HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     readbackBytes = (uint32_t)((VRAM_WIDTH + 2 * margin) * V.scale) * (uint32_t)(VRAM_HEIGHT * V.scale) * 4;
     CreateBuffer(&V.vertices, VERTEX_RING_BYTES, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
     CreateBuffer(&V.uploads, UPLOAD_RING_BYTES, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
@@ -1095,6 +1117,8 @@ int VkRendererInit(SDL_Window *window, int scale, int margin)
     }
     Check(vkAllocateDescriptorSets(V.device, &setInfo, &V.display24Set), "vkAllocateDescriptorSets");
     WriteDescriptor(V.display24Set, V.display24.view);
+    Check(vkAllocateDescriptorSets(V.device, &setInfo, &V.nativeSet), "vkAllocateDescriptorSets");
+    WriteDescriptor(V.nativeSet, V.native.view);
     Check(vkAllocateDescriptorSets(V.device, &setInfo, &V.overlaySet), "vkAllocateDescriptorSets");
     WriteDescriptorSampled(V.overlaySet, V.overlay.view, V.nearest);
 
@@ -1102,6 +1126,7 @@ int VkRendererInit(SDL_Window *window, int scale, int margin)
     drawFrag = Shader(spv_draw_frag, sizeof(spv_draw_frag));
     quadVert = Shader(spv_quad_vert, sizeof(spv_quad_vert));
     paintFrag = Shader(spv_paint_frag, sizeof(spv_paint_frag));
+    downsampleFrag = Shader(spv_downsample_frag, sizeof(spv_downsample_frag));
     presentFrag = Shader(spv_present_frag, sizeof(spv_present_frag));
     overlayFrag = Shader(spv_overlay_frag, sizeof(spv_overlay_frag));
     V.pipelines[PIPE_OPAQUE] = CreatePipeline(drawVert, drawFrag, 1, VK_FORMAT_R8G8B8A8_UNORM, -1);
@@ -1109,12 +1134,15 @@ int VkRendererInit(SDL_Window *window, int scale, int margin)
         V.pipelines[PIPE_SEMI0 + i] = CreatePipeline(drawVert, drawFrag, 1, VK_FORMAT_R8G8B8A8_UNORM, (int)i);
     }
     V.pipelines[PIPE_PAINT] = CreatePipeline(quadVert, paintFrag, 0, VK_FORMAT_R8G8B8A8_UNORM, -1);
+    V.pipelines[PIPE_DOWNSAMPLE] = CreatePipeline(quadVert, downsampleFrag, 0, VK_FORMAT_R8G8B8A8_UNORM, -1);
     V.pipelines[PIPE_PRESENT] = CreatePipeline(quadVert, presentFrag, 0, V.swapFormat, -1);
+    V.pipelines[PIPE_SHOWN] = CreatePipeline(quadVert, presentFrag, 0, VK_FORMAT_R8G8B8A8_UNORM, -1);
     V.pipelines[PIPE_OVERLAY] = CreatePipeline(quadVert, overlayFrag, 0, V.swapFormat, 4);
     vkDestroyShaderModule(V.device, drawVert, NULL);
     vkDestroyShaderModule(V.device, drawFrag, NULL);
     vkDestroyShaderModule(V.device, quadVert, NULL);
     vkDestroyShaderModule(V.device, paintFrag, NULL);
+    vkDestroyShaderModule(V.device, downsampleFrag, NULL);
     vkDestroyShaderModule(V.device, presentFrag, NULL);
     vkDestroyShaderModule(V.device, overlayFrag, NULL);
 
@@ -1124,6 +1152,7 @@ int VkRendererInit(SDL_Window *window, int scale, int margin)
     ImageLayout(V.vram.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     ImageLayout(V.display24.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     ImageLayout(V.overlay.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    ImageLayout(V.native.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     for (i = 0; i < SURFACE_COUNT; i++) {
         VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         ImageLayout(V.surfaces[i].image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
@@ -1206,6 +1235,108 @@ static VkDescriptorSet DisplaySource(float uv[4], int *pixelW, int *pixelH, Imag
         *widthRatio = (float)width / w;
         return s->set;
     }
+}
+
+/* The shown picture's source for the display mode: DisplaySource's, or for the modes that start from the
+ * console's resolution, its copy brought down to it. */
+static VkDescriptorSet PrepareDisplay(float uv[4], float *widthRatio, int *mode)
+{
+    int pixelW, pixelH, offX, offY, scale, w, h;
+    Image *image;
+    VkDescriptorSet set = DisplaySource(uv, &pixelW, &pixelH, &image, &offX, &offY, widthRatio);
+    VkRenderingAttachmentInfo color = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    VkRenderingInfo info = {VK_STRUCTURE_TYPE_RENDERING_INFO};
+    VkViewport viewport;
+    VkRect2D scissor;
+    Push push;
+
+    *mode = V.crt ? DISPLAY_SCANLINES + V.crt - 1 : V.downsample;
+    if (*mode < DISPLAY_SHARP) {
+        return set;
+    }
+    scale = image == &V.display24 ? 1 : V.scale;
+    w = pixelW / scale, h = pixelH / scale;
+    if (w > NATIVE_WIDTH) w = NATIVE_WIDTH;
+    if (h > NATIVE_HEIGHT) h = NATIVE_HEIGHT;
+    if (w <= 0 || h <= 0) {
+        *mode = DISPLAY_BILINEAR;
+        return set;
+    }
+    color.imageView = V.native.view;
+    color.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    info.renderArea.extent.width = (uint32_t)w;
+    info.renderArea.extent.height = (uint32_t)h;
+    info.layerCount = 1;
+    info.colorAttachmentCount = 1;
+    info.pColorAttachments = &color;
+    vkCmdBeginRendering(V.cmd, &info);
+    viewport.x = viewport.y = 0;
+    viewport.width = (float)w;
+    viewport.height = (float)h;
+    viewport.minDepth = 0;
+    viewport.maxDepth = 1;
+    scissor.offset.x = scissor.offset.y = 0;
+    scissor.extent = info.renderArea.extent;
+    vkCmdSetViewport(V.cmd, 0, 1, &viewport);
+    vkCmdSetScissor(V.cmd, 0, 1, &scissor);
+    vkCmdBindPipeline(V.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V.pipelines[PIPE_DOWNSAMPLE]);
+    vkCmdBindDescriptorSets(V.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V.layout, 0, 1, &set, 0, NULL);
+    memset(&push, 0, sizeof(push));
+    push.rect[0] = -1, push.rect[1] = -1, push.rect[2] = 1, push.rect[3] = 1;
+    push.extra[0] = (float)offX, push.extra[1] = (float)offY, push.extra[2] = (float)scale;
+    PushConstants(&push);
+    vkCmdDraw(V.cmd, 4, 1, 0, 0);
+    vkCmdEndRendering(V.cmd);
+    Barrier();
+    V.boundPipe = -1;
+    uv[0] = uv[1] = 0;
+    uv[2] = (float)w / NATIVE_WIDTH;
+    uv[3] = (float)h / NATIVE_HEIGHT;
+    return V.nativeSet;
+}
+
+/* Draws the prepared picture at its aspect ratio, centred in a target of width x height, with bars where
+ * the target's shape differs. Inside a rendering pass. */
+static void DrawPicture(int pipe, VkDescriptorSet set, const float uv[4], int mode, float aspect, uint32_t width,
+                        uint32_t height)
+{
+    VkViewport viewport;
+    VkRect2D scissor;
+    Push push;
+    float w = (float)width, h = w / aspect;
+    if (h > height) {
+        h = (float)height;
+        w = h * aspect;
+    }
+    viewport.x = (width - w) / 2;
+    viewport.y = (height - h) / 2;
+    viewport.width = w;
+    viewport.height = h;
+    viewport.minDepth = 0;
+    viewport.maxDepth = 1;
+    scissor.offset.x = scissor.offset.y = 0;
+    scissor.extent.width = width;
+    scissor.extent.height = height;
+    vkCmdSetViewport(V.cmd, 0, 1, &viewport);
+    vkCmdSetScissor(V.cmd, 0, 1, &scissor);
+    vkCmdBindPipeline(V.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V.pipelines[pipe]);
+    vkCmdBindDescriptorSets(V.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V.layout, 0, 1, &set, 0, NULL);
+    push.rect[0] = -1, push.rect[1] = -1, push.rect[2] = 1, push.rect[3] = 1;
+    memcpy(push.extra, uv, sizeof(push.extra));
+    push.params[0] = (float)mode;
+    push.params[1] = (float)V.curvature;
+    push.params[2] = w, push.params[3] = h;
+    PushConstants(&push);
+    vkCmdDraw(V.cmd, 4, 1, 0, 0);
+}
+
+void VkRendererSetDisplay(int downsample, int crt, int curvature)
+{
+    V.downsample = downsample < 0 ? 0 : (downsample > DISPLAY_SHARP ? DISPLAY_SHARP : downsample);
+    V.crt = crt < 0 ? 0 : (crt > DISPLAY_MASK - DISPLAY_SCANLINES + 1 ? DISPLAY_MASK - DISPLAY_SCANLINES + 1 : crt);
+    V.curvature = curvature ? 1 : 0;
 }
 
 /* Copies a changed overlay picture to its image. */
@@ -1310,8 +1441,7 @@ void VkRendererPresent(float aspect)
     uint32_t index;
     VkResult result;
     float uv[4];
-    int pixelW, pixelH, offX, offY;
-    Image *image;
+    int mode;
     VkDescriptorSet set;
     VkRenderingAttachmentInfo color = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     VkRenderingInfo info = {VK_STRUCTURE_TYPE_RENDERING_INFO};
@@ -1321,6 +1451,10 @@ void VkRendererPresent(float aspect)
     VkPresentInfoKHR present = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     float w, h;
 
+    if (SDL_GetWindowFlags(V.window) & SDL_WINDOW_HIDDEN) {
+        SubmitAndWait(VK_NULL_HANDLE, VK_NULL_HANDLE); /* a test's hidden window: drawn, never shown */
+        return;
+    }
     if (!V.swapchain || V.swapExtent.width == 0) {
         CreateSwapchain();
         if (!V.swapchain || V.swapExtent.width == 0) {
@@ -1330,7 +1464,7 @@ void VkRendererPresent(float aspect)
     }
     BeginCommands();
     EndRendering();
-    set = DisplaySource(uv, &pixelW, &pixelH, &image, &offX, &offY, &widthRatio);
+    set = PrepareDisplay(uv, &widthRatio, &mode);
     aspect *= widthRatio;
     UploadOverlay();
     result = vkAcquireNextImageKHR(V.device, V.swapchain, UINT64_MAX, V.acquired, VK_NULL_HANDLE, &index);
@@ -1351,29 +1485,7 @@ void VkRendererPresent(float aspect)
     info.pColorAttachments = &color;
     vkCmdBeginRendering(V.cmd, &info);
     if (g_gpuDisplay.enabled) {
-        /* The picture at its aspect ratio, centred, with bars where the window's shape differs. */
-        w = (float)V.swapExtent.width;
-        h = w / aspect;
-        if (h > V.swapExtent.height) {
-            h = (float)V.swapExtent.height;
-            w = h * aspect;
-        }
-        viewport.x = (V.swapExtent.width - w) / 2;
-        viewport.y = (V.swapExtent.height - h) / 2;
-        viewport.width = w;
-        viewport.height = h;
-        viewport.minDepth = 0;
-        viewport.maxDepth = 1;
-        scissor.offset.x = scissor.offset.y = 0;
-        scissor.extent = V.swapExtent;
-        vkCmdSetViewport(V.cmd, 0, 1, &viewport);
-        vkCmdSetScissor(V.cmd, 0, 1, &scissor);
-        vkCmdBindPipeline(V.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V.pipelines[PIPE_PRESENT]);
-        vkCmdBindDescriptorSets(V.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V.layout, 0, 1, &set, 0, NULL);
-        push.rect[0] = -1, push.rect[1] = -1, push.rect[2] = 1, push.rect[3] = 1;
-        memcpy(push.extra, uv, sizeof(uv));
-        PushConstants(&push);
-        vkCmdDraw(V.cmd, 4, 1, 0, 0);
+        DrawPicture(PIPE_PRESENT, set, uv, mode, aspect, V.swapExtent.width, V.swapExtent.height);
     }
     if (V.overlayPixels) {
         /* The overlay at 16:9, centred over the whole window. */
@@ -1395,6 +1507,7 @@ void VkRendererPresent(float aspect)
         vkCmdSetScissor(V.cmd, 0, 1, &scissor);
         vkCmdBindPipeline(V.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V.pipelines[PIPE_OVERLAY]);
         vkCmdBindDescriptorSets(V.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, V.layout, 0, 1, &V.overlaySet, 0, NULL);
+        memset(&push, 0, sizeof(push));
         push.rect[0] = -1, push.rect[1] = -1, push.rect[2] = 1, push.rect[3] = 1;
         push.extra[0] = push.extra[1] = 0, push.extra[2] = push.extra[3] = 1;
         PushConstants(&push);
@@ -1414,7 +1527,70 @@ void VkRendererPresent(float aspect)
         vkDeviceWaitIdle(V.device);
         CreateSwapchain();
     }
-    (void)pixelW, (void)pixelH, (void)image, (void)offX, (void)offY;
+}
+
+const uint32_t *VkRendererCaptureShown(float aspect, int width, int height)
+{
+    VkRenderingAttachmentInfo color = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    VkRenderingInfo info = {VK_STRUCTURE_TYPE_RENDERING_INFO};
+    VkBufferImageCopy copy;
+    VkDescriptorSet set;
+    static uint32_t *capture;
+    const uint32_t *src;
+    float uv[4], widthRatio;
+    int mode, i;
+
+    if ((uint32_t)width * (uint32_t)height * 4 > V.readback.size) {
+        return NULL;
+    }
+    BeginCommands();
+    EndRendering();
+    if (V.shown.width != width || V.shown.height != height) {
+        SubmitAndWait(VK_NULL_HANDLE, VK_NULL_HANDLE);
+        if (V.shown.image) {
+            vkDeviceWaitIdle(V.device);
+            vkDestroyImageView(V.device, V.shown.view, NULL);
+            vkDestroyImage(V.device, V.shown.image, NULL);
+            vkFreeMemory(V.device, V.shown.memory, NULL);
+        }
+        CreateImage(&V.shown, width, height, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        BeginCommands();
+        ImageLayout(V.shown.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    }
+    set = PrepareDisplay(uv, &widthRatio, &mode);
+    color.imageView = V.shown.view;
+    color.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    info.renderArea.extent.width = (uint32_t)width;
+    info.renderArea.extent.height = (uint32_t)height;
+    info.layerCount = 1;
+    info.colorAttachmentCount = 1;
+    info.pColorAttachments = &color;
+    vkCmdBeginRendering(V.cmd, &info);
+    if (g_gpuDisplay.enabled) {
+        DrawPicture(PIPE_SHOWN, set, uv, mode, aspect * widthRatio, (uint32_t)width, (uint32_t)height);
+    }
+    vkCmdEndRendering(V.cmd);
+    Barrier();
+    V.boundPipe = -1;
+    memset(&copy, 0, sizeof(copy));
+    copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copy.imageSubresource.layerCount = 1;
+    copy.imageExtent.width = (uint32_t)width;
+    copy.imageExtent.height = (uint32_t)height;
+    copy.imageExtent.depth = 1;
+    vkCmdCopyImageToBuffer(V.cmd, V.shown.image, VK_IMAGE_LAYOUT_GENERAL, V.readback.buffer, 1, &copy);
+    Barrier();
+    SubmitAndWait(VK_NULL_HANDLE, VK_NULL_HANDLE);
+    capture = SDL_realloc(capture, (size_t)width * height * 4);
+    src = (const uint32_t *)V.readback.mapped;
+    for (i = 0; i < width * height; i++) {
+        uint32_t p = src[i]; /* RGBA bytes: R in the low byte */
+        capture[i] = (p & 0xFF) << 16 | (p & 0xFF00) | ((p >> 16) & 0xFF);
+    }
+    return capture;
 }
 
 const uint32_t *VkRendererCapture(int *width, int *height)

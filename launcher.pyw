@@ -30,17 +30,19 @@ DOJO_VERSION = "0.1.8"
 
 # The folder of Dojo.exe in a release, of this file in a checkout.
 PORT_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
+WINDOWS = sys.platform == "win32"   # else Linux: run as `python3 launcher.pyw`, the toolchain fetched by it
+EXE_SUFFIX = ".exe" if WINDOWS else ""
 TOOLCHAIN = os.path.join(PORT_DIR, "toolchain")
-CMAKE = os.path.join(TOOLCHAIN, "cmake", "bin", "cmake.exe")
+CMAKE = os.path.join(TOOLCHAIN, "cmake", "bin", "cmake" + EXE_SUFFIX)
 DECOMP_DIR = os.path.join(PORT_DIR, "decomp")
 
 # The decompilation, with Dojo's changes, this version is built from: a branch of a fork of the decompilation,
 # fetched at this exact commit.
-DECOMP_COMMIT = "5c5dcf0aeae79eb3c76e3ca8ddba73d55b5f6f54"
+DECOMP_COMMIT = "77e7724bd80491a99c1c072c3880b4cac72b3fbe"
 DECOMP_URL = "https://github.com/tisquantum/bushido/archive/%s.zip" % DECOMP_COMMIT
 DECOMP_STAMP = ".dojo-decomp"
 BUILD_DIR = os.path.join(PORT_DIR, "build")
-EXE = os.path.join(BUILD_DIR, "dojo.exe")
+EXE = os.path.join(BUILD_DIR, "dojo" + EXE_SUFFIX)
 INI = os.path.join(BUILD_DIR, "dojo.ini")
 LAUNCHER_JSON = os.path.join(PORT_DIR, "launcher.json")
 GAME_LOG = os.path.join(PORT_DIR, "dojo.log")
@@ -253,7 +255,8 @@ def dark_title_bar(root):
 
 
 def default_name():
-    name = "".join(c for c in os.environ.get("USERNAME", "") if c.isalnum() or c in "_-")[:23]
+    user = os.environ.get("USERNAME") or os.environ.get("USER", "")
+    name = "".join(c for c in user if c.isalnum() or c in "_-")[:23]
     return name or "Samurai"
 
 
@@ -263,7 +266,8 @@ DEFAULTS = {
     "fps": 0, "scale": 4, "software": 0, "fullscreen": 0, "vsync": 0, "volume": 100, "show_fps": 0,
     "analog_stick": 0, "p2p_port": 7778, "watch_hill": 1, "offline": 0, "stick_deadzone": 50, "rumble": 100,
     "dualsense_haptics": 1, "keyboard_player": 1, "online_delay": -1, "quick_max_ping": 160,
-    "online_first_to": 0,
+    "online_first_to": 0, "fix_original_bugs": 0, "extras": 0, "japanese_blood": 0,
+    "downsample": "off", "crt": "off", "crt_curvature": 0,
 }
 
 
@@ -376,6 +380,8 @@ class Gamepads:
         self.open = {}   # SDL_JoystickID: SDL_Gamepad *
         path = os.path.join(getattr(sys, "_MEIPASS", ""), "SDL3.dll") if getattr(sys, "frozen", False) else \
             os.path.join(PORT_DIR, "dist", "_pyinstaller", "sdl64", "SDL3.dll")
+        if not WINDOWS:
+            path = "libSDL3.so.0"   # the system's own (64-bit), if it has one
         try:
             import ctypes
             sdl = ctypes.CDLL(path)
@@ -637,6 +643,14 @@ def toolchain_version():
             return f.read().strip()
     except OSError:
         return None
+
+
+def open_file(path):
+    """Opens a file or a web address with what the system uses for it."""
+    if WINDOWS:
+        os.startfile(path)
+    else:
+        subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def version_key(text):
@@ -997,6 +1011,16 @@ class Launcher:
         check(5, 0, "Full screen  (F11 switches in game)", "fullscreen")
         check(6, 0, "V-sync", "vsync")
         check(7, 0, "Show the frame rate", "show_fps")
+        combo(8, 0, "Downsampling (Vulkan)", "downsample",
+              ["Off (bilinear)", "Smooth (supersampled)", "Native (console pixels)"], ["off", "smooth", "native"])
+        combo(9, 0, "CRT look (Vulkan)", "crt", ["Off", "Scanlines", "Aperture grille", "Shadow mask"],
+              ["off", "scanlines", "aperture", "mask"])
+        check(10, 0, "Curved CRT glass", "crt_curvature")
+
+        section(12, 0, "Game (online: each only when both players have it on)")
+        check(13, 0, "Fix the original game's bugs", "fix_original_bugs")
+        check(14, 0, "Extras: the hidden Stage 18 in VS, a two-player Continue screen", "extras")
+        check(15, 0, "Amber blood, as in the Japanese release", "japanese_blood")
 
         section(0, 2, "Sound and controls")
         ttk.Label(tab, text="Volume").grid(row=1, column=2, sticky="w", padx=(0, 8))
@@ -1031,9 +1055,9 @@ class Launcher:
 
         ttk.Label(tab, text="These are saved to dojo.ini beside the game. The in-game options menu (F1) "
                   "changes the same settings.", style="Sub.TLabel", wraplength=640).grid(
-            row=14, column=0, columnspan=4, sticky="w", pady=(18, 0))
+            row=16, column=0, columnspan=4, sticky="w", pady=(18, 0))
         ttk.Button(tab, text="Reset to defaults", command=self.reset_settings).grid(
-            row=15, column=0, sticky="w", pady=(8, 0))
+            row=17, column=0, sticky="w", pady=(8, 0))
 
     def build_server_row(self, tab, row, col, value):
         """The matchmaking server: the official one, locked, unless the player confirms they want another."""
@@ -1194,8 +1218,9 @@ class Launcher:
         version = toolchain_version()
         if version:
             ttk.Label(self.tool_frame, text="OK", style="Good.TLabel", width=9).grid(row=0, column=0, sticky="w")
-            ttk.Label(self.tool_frame, text="Bundled toolchain %s: Clang (llvm-mingw), CMake, Ninja, Python, SDL3, "
-                      "glslang. Nothing to install." % version).grid(row=0, column=1, sticky="w")
+            ttk.Label(self.tool_frame, text=("Bundled toolchain %s: Clang (llvm-mingw), CMake, Ninja, Python, SDL3, "
+                      "glslang. Nothing to install." if WINDOWS else "Toolchain %s: Zig (Clang), CMake, Ninja, SDL3, "
+                      "glslang.") % version).grid(row=0, column=1, sticky="w")
         else:
             ttk.Label(self.tool_frame, text="Missing", style="Bad.TLabel", width=9).grid(row=0, column=0,
                                                                                         sticky="w")
@@ -1204,8 +1229,8 @@ class Launcher:
                 ttk.Label(self.tool_frame, text="The toolchain folder is missing: unpack the whole Dojo zip again."
                           ).grid(row=0, column=1, sticky="w")
             else:
-                ttk.Label(self.tool_frame, text="No toolchain in this checkout yet (about 200 MB to download)."
-                          ).grid(row=0, column=1, sticky="w")
+                ttk.Label(self.tool_frame, text="No toolchain here yet (about %d MB to download)."
+                          % (200 if WINDOWS else 120)).grid(row=0, column=1, sticky="w")
                 ttk.Button(self.tool_frame, text="Fetch toolchain", command=self.fetch_toolchain).grid(
                     row=0, column=2, sticky="e")
         self.update_buttons()
@@ -1230,7 +1255,7 @@ class Launcher:
 
     def open_game_log(self):
         if os.path.isfile(GAME_LOG):
-            os.startfile(GAME_LOG)
+            open_file(GAME_LOG)
         else:
             self.status.configure(text="No game log yet: it's written while the game runs.")
 
@@ -1269,7 +1294,7 @@ class Launcher:
             moved = home is not None and \
                 os.path.normcase(os.path.normpath(home.group(1).strip())) != os.path.normcase(os.path.normpath(PORT_DIR))
             if "CMAKE_C_FLAGS_%s:STRING=\n" % self.build_type.get().upper() in text or \
-                    "i686-w64-mingw32-clang" not in text or moved:
+                    ("i686-w64-mingw32-clang" if WINDOWS else "zig-cc") not in text or moved:
                 os.remove(cache)
                 shutil.rmtree(os.path.join(BUILD_DIR, "CMakeFiles"), ignore_errors=True)
         self.run_steps([configure, [CMAKE, "--build", BUILD_DIR]], "Built.", then_play=then_play)
@@ -1280,9 +1305,13 @@ class Launcher:
         self.update_buttons()
         self.tabs.select(2)
         env = dict(os.environ)
-        # Only the bundled tools: nothing installed on this PC takes part.
-        env["PATH"] = os.pathsep.join([os.path.join(TOOLCHAIN, "llvm-mingw", "bin"), os.path.join(TOOLCHAIN, "ninja"),
-                                       os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")])
+        # Only the bundled tools: nothing installed on this PC takes part (on Linux, but the shell and Python).
+        if WINDOWS:
+            env["PATH"] = os.pathsep.join([os.path.join(TOOLCHAIN, "llvm-mingw", "bin"),
+                                           os.path.join(TOOLCHAIN, "ninja"),
+                                           os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")])
+        else:
+            env["PATH"] = os.pathsep.join([os.path.join(TOOLCHAIN, "ninja"), "/usr/bin", "/bin"])
         self.after_steps = after
 
         def work():
@@ -1698,7 +1727,7 @@ class Launcher:
 
     def open_release_notes(self):
         if self.update and self.update.get("notes"):
-            os.startfile(self.update["notes"])
+            open_file(self.update["notes"])
 
     def update_now(self):
         self.update_wanted = True

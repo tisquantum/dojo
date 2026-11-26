@@ -5,8 +5,16 @@
  * emulated vertical blank (kernel.c) switches back here; the host handles window events, shows the GPU's
  * display area and waits for the real field time before resuming the game. */
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <signal.h>
+#include <ucontext.h>
+#include <unistd.h>
+#endif
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +30,7 @@
 #include "kernel_port.h"
 #include "netplay.h"
 #include "pc_substep.h"
+#include "pc_rules.h"
 #include "savestate.h"
 #include "vk_renderer.h"
 #include "settings.h"
@@ -107,7 +116,13 @@ static void FindGameFolder(void)
         f = fopen(probe, "rb");
         if (f) {
             fclose(f);
+#ifdef _WIN32
             SetCurrentDirectoryA(dir);
+#else
+            if (chdir(dir) != 0) {
+                continue;
+            }
+#endif
             return;
         }
     }
@@ -405,8 +420,18 @@ static void PresentPicture(void)
     if (sVulkan) {
         if (sShotEvery && sField % sShotEvery == 0) {
             int cw, ch;
-            const uint32_t *pixels = VkRendererCapture(&cw, &ch);
-            SaveShot(pixels, cw, ch);
+            const uint32_t *pixels;
+            if (SDL_getenv("DOJO_SHOT_SHOWN")) {
+                /* "WxH": the picture as the window would show it, display mode and all */
+                cw = 1280, ch = 960;
+                sscanf(SDL_getenv("DOJO_SHOT_SHOWN"), "%dx%d", &cw, &ch);
+                pixels = VkRendererCaptureShown(4.0f / 3.0f, cw, ch);
+            } else {
+                pixels = VkRendererCapture(&cw, &ch);
+            }
+            if (pixels) {
+                SaveShot(pixels, cw, ch);
+            }
         }
         VkRendererSetOverlay(overlay, overlayChanged);
         VkRendererPresent(4.0f / 3.0f);
@@ -561,6 +586,7 @@ void HostVerticalBlank(void)
     ContextSwitchToHost();
 }
 
+#ifdef _WIN32
 /* On a crash, prints the faulting address and the frame-pointer chain; resolve them with
  * llvm-symbolizer --obj=dojo.exe <addresses>. A vectored handler, so it runs on the game's stack too,
  * whose handler chain is empty; it lets every exception that is not a fault go on to the usual handling. */
@@ -651,6 +677,139 @@ static DWORD WINAPI Watchdog(void *param)
         }
     }
 }
+
+static void InstallCrashHandler(void)
+{
+    AddVectoredExceptionHandler(1, CrashHandler);
+}
+
+static void StartWatchdog(void)
+{
+    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &sMainThread, 0, FALSE,
+                    DUPLICATE_SAME_ACCESS);
+    CreateThread(NULL, 0, Watchdog, NULL, 0, NULL);
+}
+#else
+/* Whether 8 bytes at p can be read: a write from them to a pipe fails with EFAULT if not. */
+static int Readable(const void *p)
+{
+    static int fds[2] = {-1, -1};
+    char sink[8];
+    if (fds[0] < 0 && pipe(fds) != 0) {
+        return 0;
+    }
+    if (write(fds[1], p, 8) != 8) {
+        return 0;
+    }
+    return read(fds[0], sink, 8) == 8;
+}
+
+static void PrintFrames(uint32_t eip, uintptr_t *frame, int count)
+{
+    int i;
+    fprintf(stderr, "stack: %08lx", (unsigned long)eip);
+    for (i = 0; i < count && frame && Readable(frame); i++) {
+        fprintf(stderr, " %08lx", (unsigned long)frame[1]);
+        frame = (uintptr_t *)frame[0];
+    }
+    fprintf(stderr, "\n");
+}
+
+/* On a crash, prints the faulting address and the frame-pointer chain; resolve them with
+ * llvm-symbolizer --obj=dojo <addresses>. It runs on the stack that faulted, the game's too. Faults the
+ * I/O registers take for their writes are mmio.c's, which passes every other one here. */
+static void CrashHandler(int sig, siginfo_t *info, void *context)
+{
+    ucontext_t *uc = context;
+    greg_t *g = uc->uc_mcontext.gregs;
+    uint32_t *sp = (uint32_t *)(uintptr_t)g[REG_ESP];
+    int i;
+    fprintf(stderr, "crash: signal %d at %08lx (field %lu)\n", sig, (unsigned long)g[REG_EIP], sField);
+    if (sig == SIGSEGV || sig == SIGBUS) {
+        fprintf(stderr, "crash: %s %08lx\n", (g[REG_ERR] & 2) ? "writing" : "reading",
+                (unsigned long)(uintptr_t)info->si_addr);
+    }
+    fprintf(stderr, "regs: esp %08lx ebp %08lx eax %08lx ecx %08lx edx %08lx\n", (unsigned long)g[REG_ESP],
+            (unsigned long)g[REG_EBP], (unsigned long)g[REG_EAX], (unsigned long)g[REG_ECX],
+            (unsigned long)g[REG_EDX]);
+    fprintf(stderr, "esp:");
+    for (i = 0; i < 16 && Readable(sp + i); i++) {
+        fprintf(stderr, " %08lx", (unsigned long)sp[i]);
+    }
+    fprintf(stderr, "\n");
+    {
+        void TracePrint(FILE *out);
+        TracePrint(stderr);
+    }
+    PrintFrames((uint32_t)g[REG_EIP], (uintptr_t *)(uintptr_t)g[REG_EBP], 32);
+    fflush(stderr);
+    _exit(3);
+}
+
+static void InstallCrashHandler(void)
+{
+    static const int signals[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE};
+    struct sigaction action;
+    unsigned i;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = CrashHandler;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    for (i = 0; i < sizeof(signals) / sizeof(signals[0]); i++) {
+        sigaction(signals[i], &action, NULL);
+    }
+}
+
+/* In scripted runs, a thread that reports where the game is when no field has passed for three seconds:
+ * a wait on emulated hardware that never ends. It signals the main thread, which prints where it was. */
+static pthread_t sMainThread;
+
+static void StallHandler(int sig, siginfo_t *info, void *context)
+{
+    greg_t *g = ((ucontext_t *)context)->uc_mcontext.gregs;
+    (void)sig, (void)info;
+    fprintf(stderr, "stalled: field %lu, eip %08lx, ebp %08lx\n", sField, (unsigned long)g[REG_EIP],
+            (unsigned long)g[REG_EBP]);
+    PrintFrames((uint32_t)g[REG_EIP], (uintptr_t *)(uintptr_t)g[REG_EBP], 16);
+    fflush(stderr);
+    _exit(4);
+}
+
+static void *Watchdog(void *param)
+{
+    unsigned long lastField = 0;
+    int stalled = 0;
+    (void)param;
+    for (;;) {
+        sleep(1);
+        if (sField != lastField || OverlayIsOpen() || NetplayActive() || OnlineWantsToWatch()) {
+            /* the game moved on, or waits for the menu on purpose */
+            lastField = sField;
+            stalled = 0;
+            continue;
+        }
+        if (++stalled == 3) {
+            pthread_kill(sMainThread, SIGUSR1);
+            sleep(5);
+            _exit(4);
+        }
+    }
+    return NULL;
+}
+
+static void StartWatchdog(void)
+{
+    struct sigaction action;
+    pthread_t thread;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = StallHandler;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGUSR1, &action, NULL);
+    sMainThread = pthread_self();
+    pthread_create(&thread, NULL, Watchdog, NULL);
+}
+#endif
 
 /* DOJO_STATE_TEST="F,G": saves the simulation at field F, runs to G and notes its hash, restores F, runs
  * to G again and compares: a save state that misses any of the simulation shows as two hashes. */
@@ -779,6 +938,17 @@ static void ApplySetting(OverlayChange change)
             SDL_SetAudioStreamGain(sAudio, g_settings.volume / 100.0f);
         }
         break;
+    case OVERLAY_CHANGE_PICTURE:
+        if (sVulkan) {
+            VkRendererSetDisplay(g_settings.downsample, g_settings.crt, g_settings.crtCurvature);
+        }
+        break;
+    case OVERLAY_CHANGE_RULES:
+        /* Offline only, as the rate: an online match keeps the rules agreed. */
+        if (!NetplayActive()) {
+            g_pcRules = HostOwnRules();
+        }
+        break;
     case OVERLAY_CHANGE_QUIT:
         sQuit = 1;
         break;
@@ -812,6 +982,12 @@ int HostOwnTicksPerFrame(void)
     return ChooseTicksPerFrame();
 }
 
+int HostOwnRules(void)
+{
+    return (g_settings.fixBugs ? PC_RULE_FIX_BUGS : 0) | (g_settings.extras ? PC_RULE_EXTRAS : 0) |
+           (g_settings.jpBlood ? PC_RULE_JP_BLOOD : 0);
+}
+
 static void GameEntry(void)
 {
     GameMain();
@@ -820,9 +996,13 @@ static void GameEntry(void)
 
 int main(int argc, char **argv)
 {
-    AddVectoredExceptionHandler(1, CrashHandler);
+    InstallCrashHandler();
     if (!MemoryInit()) {
+#ifdef _WIN32
         HostFatal("could not map the console's RAM at 0x80000000 (the port needs 64-bit Windows)");
+#else
+        HostFatal("could not map the console's RAM at 0x80000000 (the port needs a 64-bit kernel)");
+#endif
     }
     if (!MmioInit()) {
         HostFatal("could not map the console's I/O registers at 0x1F800000");
@@ -861,6 +1041,7 @@ int main(int argc, char **argv)
         const char *scale = SDL_getenv("DOJO_SCALE");
         const char *which = SDL_getenv("DOJO_RENDERER");
         const char *quickPing = SDL_getenv("DOJO_QUICK_MAX_PING");
+        int i;
         if (fps) {
             g_settings.fps = atoi(fps) > 0 ? atoi(fps) : 30;
         }
@@ -870,26 +1051,50 @@ int main(int argc, char **argv)
         if (SDL_getenv("DOJO_FIRST_TO")) {
             g_settings.firstTo = atoi(SDL_getenv("DOJO_FIRST_TO"));
         }
+        if (SDL_getenv("DOJO_RULES")) {
+            /* pc_rules.h's bits: 1 bugs fixed, 2 extras, 4 Japanese blood */
+            int rules = atoi(SDL_getenv("DOJO_RULES"));
+            g_settings.fixBugs = !!(rules & PC_RULE_FIX_BUGS);
+            g_settings.extras = !!(rules & PC_RULE_EXTRAS);
+            g_settings.jpBlood = !!(rules & PC_RULE_JP_BLOOD);
+        }
         if (scale) {
             g_settings.scale = atoi(scale) < 1 ? 1 : (atoi(scale) > 8 ? 8 : atoi(scale));
         }
         if (which) {
             g_settings.software = strcmp(which, "software") == 0;
         }
+        /* DOJO_DOWNSAMPLE / DOJO_CRT: settings.h's names; DOJO_CRT_CURVATURE: 0 or 1 */
+        for (i = 0; SDL_getenv("DOJO_DOWNSAMPLE") && i < SETTINGS_DOWNSAMPLE_COUNT; i++) {
+            if (strcmp(SDL_getenv("DOJO_DOWNSAMPLE"), SETTINGS_DOWNSAMPLES[i]) == 0) {
+                g_settings.downsample = i;
+            }
+        }
+        for (i = 0; SDL_getenv("DOJO_CRT") && i < SETTINGS_CRT_COUNT; i++) {
+            if (strcmp(SDL_getenv("DOJO_CRT"), SETTINGS_CRTS[i]) == 0) {
+                g_settings.crt = i;
+            }
+        }
+        if (SDL_getenv("DOJO_CRT_CURVATURE")) {
+            g_settings.crtCurvature = atoi(SDL_getenv("DOJO_CRT_CURVATURE")) != 0;
+        }
     }
     SetAspect();
-    if (SDL_getenv("DOJO_HIDDEN")) {
+    if (SDL_getenv("DOJO_HIDDEN") && !(SDL_getenv("DOJO_RENDERER") && !g_settings.software)) {
         /* For tests run while someone uses the machine: no window on the screen, drawn on the CPU (the
-         * simulation is the same with either renderer). */
+         * simulation is the same with either renderer). DOJO_RENDERER=vulkan keeps Vulkan, drawing into a
+         * hidden window that is never presented to (a test of its pictures takes DOJO_SHOT_SHOWN's). */
         g_settings.software = 1;
     }
     {
         /* Vulkan draws at the scale setting (default 4) times the console's resolution; the software
          * setting, or no Vulkan, draws at 1x on the CPU. */
         if (!g_settings.software) {
-            sWindow = SDL_CreateWindow("Dojo", 1600, 900, SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN);
+            sWindow = SDL_CreateWindow("Dojo", 1600, 900, SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN |
+                                                              (SDL_getenv("DOJO_HIDDEN") ? SDL_WINDOW_HIDDEN : 0));
             if (sWindow && VkRendererInit(sWindow, g_settings.scale, g_pcScreenMargin)) {
                 sVulkan = 1;
+                VkRendererSetDisplay(g_settings.downsample, g_settings.crt, g_settings.crtCurvature);
             } else if (sWindow) {
                 SDL_DestroyWindow(sWindow);
                 sWindow = NULL;
@@ -926,6 +1131,7 @@ int main(int argc, char **argv)
     InputInit();
 
     g_pcTicksPerFrame = ChooseTicksPerFrame();
+    g_pcRules = HostOwnRules(); /* (a DOJO_NET test's two machines are given the same) */
     {
         int agreedMargin, agreedTicks;
         if (NetplayStart(g_pcScreenMargin, g_pcTicksPerFrame, &agreedMargin, &agreedTicks)) {
@@ -935,6 +1141,10 @@ int main(int argc, char **argv)
         }
     }
     fprintf(stderr, "simulation: %d ticks a frame (%d a second)\n", g_pcTicksPerFrame, g_pcTicksPerFrame * 30);
+    if (g_pcRules) {
+        fprintf(stderr, "rules:%s%s%s\n", PC_FIX_BUGS ? " bugs fixed" : "", PC_EXTRAS ? " extras" : "",
+                PC_JP_BLOOD ? " japanese blood" : "");
+    }
     {
         OverlayContext context;
         memset(&context, 0, sizeof(context));
@@ -953,9 +1163,7 @@ int main(int argc, char **argv)
         sExitField = exitAt ? strtoul(exitAt, NULL, 10) : 0;
     }
     if (sExitField) {
-        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &sMainThread, 0, FALSE,
-                        DUPLICATE_SAME_ACCESS);
-        CreateThread(NULL, 0, Watchdog, NULL, 0, NULL);
+        StartWatchdog();
         fprintf(stderr, "memory: psx ram %p, scratchpad %p, vram %p\n", (void *)g_psxRam, (void *)g_psxScratch,
                 (void *)g_vram);
     }
@@ -1112,10 +1320,16 @@ int main(int argc, char **argv)
                 fprintf(stderr, "hash %lu %016llx\n", sField, (unsigned long long)SaveStateHash());
             }
             {
-                /* DOJO_DUMP_STATE=field: writes the save state there to state_<field>.bin, with the
-                 * addresses of its regions, for finding what two runs disagree on. */
+                /* DOJO_DUMP_STATE=field[,field...]: writes the save state there to state_<field>.bin, with
+                 * the addresses of its regions, for finding what two runs disagree on. */
                 const char *text = SDL_getenv("DOJO_DUMP_STATE");
-                if (text && strtoul(text, NULL, 10) == sField) {
+                int dump = 0;
+                while (text && *text && !dump) {
+                    char *end;
+                    dump = strtoul(text, &end, 10) == sField;
+                    text = *end == ',' ? end + 1 : NULL;
+                }
+                if (dump) {
                     uint8_t *state = SDL_malloc(SaveStateCapacity());
                     size_t size = SaveStateSave(state);
                     char name[64];

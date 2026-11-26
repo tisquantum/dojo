@@ -1,6 +1,6 @@
-/* The context switch between the host and the game (context.h), for 32-bit x86 Windows. A switch saves the
- * callee-saved registers and the thread block's exception-handler head and stack bounds on the current
- * stack, then restores the other context's, so exception dispatch sees the stack it runs on. */
+/* The context switch between the host and the game (context.h), for 32-bit x86. A switch saves the
+ * callee-saved registers on the current stack, then restores the other context's; on Windows, the thread
+ * block's exception-handler head and stack bounds too, so exception dispatch sees the stack it runs on. */
 
 #include <stdint.h>
 #include <string.h>
@@ -23,14 +23,18 @@ __attribute__((naked)) static void SwitchStacks(void **save, void *resume)
         "pushl %ebx\n\t"
         "pushl %esi\n\t"
         "pushl %edi\n\t"
+#ifdef _WIN32
         "pushl %fs:0\n\t"
         "pushl %fs:4\n\t"
         "pushl %fs:8\n\t"
+#endif
         "movl %esp, (%eax)\n\t"
         "movl %edx, %esp\n\t"
+#ifdef _WIN32
         "popl %fs:8\n\t"
         "popl %fs:4\n\t"
         "popl %fs:0\n\t"
+#endif
         "popl %edi\n\t"
         "popl %esi\n\t"
         "popl %ebx\n\t"
@@ -50,17 +54,20 @@ void ContextInit(void (*entry)(void))
 {
     uint32_t *sp = (uint32_t *)(sGameStack + GAME_STACK_SIZE);
     sEntry = entry;
-    /* The frame SwitchStacks pops on first entry: bounds and handler head, four registers, a return to
-     * GameStart, and a slot standing for GameStart's own return address. */
+    /* The frame SwitchStacks pops on first entry: (on Windows) bounds and handler head, four registers, a
+     * return to GameStart, and a slot standing for GameStart's own return address, which leaves the stack
+     * as a call would, 16-byte aligned before it (the System V ABI's rule). */
     *--sp = 0;                                       /* GameStart's return address: it never returns */
     *--sp = (uint32_t)(uintptr_t)GameStart;          /* SwitchStacks' ret */
     *--sp = 0;                                       /* ebp */
     *--sp = 0;                                       /* ebx */
     *--sp = 0;                                       /* esi */
     *--sp = 0;                                       /* edi */
+#ifdef _WIN32
     *--sp = 0xFFFFFFFFu;                             /* fs:0, the end of the handler chain */
     *--sp = (uint32_t)(uintptr_t)(sGameStack + GAME_STACK_SIZE); /* fs:4, the stack's base */
     *--sp = (uint32_t)(uintptr_t)sGameStack;         /* fs:8, its limit */
+#endif
     sGameSp = sp;
 }
 

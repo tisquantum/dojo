@@ -4,7 +4,7 @@
  * port/server/matchmaker.py has the protocol); the other player is reached directly when the two routers let
  * it (each side sends to the other's public address, which the server tells it, and goes direct once the
  * other answers), else through the server's relay ("BBRL" + match id + packet). Before a match the two
- * exchange a handshake ("BBPP ..." text: punch, hello with each one's rate, input delay and the hash of the
+ * exchange a handshake ("BBPP ..." text: punch, hello with each one's rate, input delay, rules and the hash of the
  * starting state, ready); then the rollback protocol (netplay.c) runs over the chosen path.
  *
  * A private match can also go without the server, player to player: one hosts on a UDP port (forwarded on
@@ -16,18 +16,18 @@
  * moment behind: the game is deterministic, so they see the real match, drawn and heard by their own machine. */
 
 #define WIN32_LEAN_AND_MEAN
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <SDL3/SDL.h>
+#include "net_compat.h"
 #include "online.h"
 #include "netplay.h"
 #include "savestate.h"
 #include "settings.h"
 #include "host.h"
+#include "pc_rules.h"
 #include "context.h"
 #include "kernel_port.h"
 #include "cdrom.h"
@@ -44,8 +44,9 @@
 /* Raised whenever a change makes the same inputs play out differently (the game's code, not its data, so the
  * starting state's hash alone can't tell): mixed into that hash, it turns away a player on another version.
  * 2: rain and foliage across the widescreen margin (0.1.5). 3: no pausing in a fight (0.1.6). 4: the controllers sampled before
- * every tick, not each field (0.1.6). 5: the opening and story scenes at the rate set (0.1.8). */
-#define SIM_REVISION    5
+ * every tick, not each field (0.1.6). 5: the opening and story scenes at the rate set (0.1.8). 6: a cut prop's delayed
+ * sound and the unused billboard kinds' UVs as on the console, not from the stack (0.1.9). */
+#define SIM_REVISION    6
 #define PUNCH_MS        150
 #define RELAY_AFTER_MS  1500 /* no direct answer by then: through the server */
 #define SETUP_GIVE_UP_MS 20000
@@ -99,6 +100,7 @@ static struct {
     uint32_t setupStartMs, lastPunchMs;
     int haveHello, sentReady, peerReady;
     int peerTicks, peerDelay;
+    int peerRules;         /* the rules (pc_rules.h) the other player has on; -1 before an answer has them */
     int ownDelay;          /* the input delay this machine asks for, -1 until decided; then it stays */
     uint32_t queuedMs;     /* when quick play started looking */
     uint32_t declinedMs;   /* when this machine turned the match down for its distance, or 0 */
@@ -107,6 +109,7 @@ static struct {
     int rttDirect;         /* whether the samples are the direct path's */
     uint64_t peerHash;
     int ticks, delay;
+    int rules;             /* the match's rules: those both players have on */
     int winnerSide;        /* the bout's winner seen settled, or -1 */
     int firstTo, peerFirstTo; /* the set: a side with this many bouts wins it (the larger of the two asked); 0: none */
     int wins[2];           /* bouts won this match, by side */
@@ -146,6 +149,7 @@ static struct {
         uint32_t total;    /* the log's length on the server, as last heard */
         uint32_t next;     /* the next field to run */
         int ticks;
+        int rules;
         int ended;         /* the match is over: run what is left, then stop */
         int replay;        /* from a file (OnlinePlayReplay), not the server's log */
         uint32_t lastAskMs, lastNewMs;
@@ -162,7 +166,7 @@ typedef struct SpectateHeader {
     uint32_t matchId;
     uint32_t first;
     uint16_t count;
-    uint16_t ticks;
+    uint16_t ticks;        /* the ticks a frame, and the match's rules (pc_rules.h) shifted up by 8 */
     uint32_t total;
 } SpectateHeader;
 #pragma pack(pop)
@@ -199,6 +203,11 @@ static uint64_t DiscIdentity(void)
             h = (h ^ sector[i]) * 0x100000001B3ull;
         }
     }
+#ifndef _WIN32
+    /* The Linux build is another program (its own compiler and layout), so its states never match the
+     * Windows build's: the server pairs players by this, which keeps the two apart. */
+    h ^= 0x4C696E7578000000ull;
+#endif
     return h;
 }
 
@@ -301,6 +310,7 @@ static void BringOfflineBack(void)
     }
     HostSetSimulationMargin(HostOwnMargin());
     g_pcTicksPerFrame = HostOwnTicksPerFrame();
+    g_pcRules = HostOwnRules();
     NetplaySetCardsOff(0);
     HostResetPacing();
 }
@@ -330,6 +340,7 @@ static void StartPreparing(void)
     /* The console's rate: the way to the character select passes the opening, which runs at the rate set, and
      * every machine must reach the same state whatever its own (BringOfflineBack puts its own back). */
     g_pcTicksPerFrame = 1;
+    g_pcRules = 0; /* and the console's game, whatever this machine's rules */
     NetplaySetCardsOff(1);
     O.preparing = 1;
     O.phase = 0;
@@ -444,11 +455,13 @@ static int OpenSocket(int port)
     }
     O.socketPort = port;
     ioctlsocket(O.sock, FIONBIO, &nonBlocking);
+#ifdef _WIN32
     {
         /* A send to a player who has gone would otherwise turn up as an error on a later receive. */
         DWORD off = 0, bytes = 0;
         WSAIoctl(O.sock, _WSAIOW(IOC_VENDOR, 12), &off, sizeof(off), NULL, 0, &bytes, NULL, NULL);
     }
+#endif
     return 1;
 }
 
@@ -659,10 +672,11 @@ static void RecordSettled(void)
 #pragma pack(push, 1)
 typedef struct ReplayHeader {
     char magic[4];         /* "DJRP" */
-    uint32_t version;      /* 1 */
+    uint32_t version;      /* 2 (1, before the rules, can't be played: its simulation's revision is older) */
     uint64_t startHash;
     uint32_t ticks, samples, fields;
     char names[2][24];     /* the players on the left and right pads */
+    uint32_t rules;        /* the match's (pc_rules.h) */
 } ReplayHeader;
 #pragma pack(pop)
 
@@ -690,8 +704,9 @@ static void SaveReplay(void)
     }
     memset(&h, 0, sizeof(h));
     memcpy(h.magic, "DJRP", 4);
-    h.version = 1;
+    h.version = 2;
     h.startHash = O.startHash;
+    h.rules = (uint32_t)O.rules;
     h.ticks = (uint32_t)O.ticks;
     h.samples = (uint32_t)NetplaySamplesPerField(O.ticks);
     h.fields = O.recordFields;
@@ -953,8 +968,9 @@ static void PeerLine(char *line, int direct)
     } else if (strcmp(word, "HELLO") == 0) {
         unsigned long long hash;
         char name[40];
-        /* "ticks delay hash name [set]": the set's length last, so 0.1.6 (without it) and later read each other */
-        int fields = sscanf(line, "%d %d %llx %39s %d", &O.peerTicks, &O.peerDelay, &hash, name, &O.peerFirstTo);
+        /* "ticks delay hash name [set [rules]]": what later versions added last, so earlier ones read it */
+        int fields = sscanf(line, "%d %d %llx %39s %d %d", &O.peerTicks, &O.peerDelay, &hash, name, &O.peerFirstTo,
+                            &O.peerRules);
         if (fields >= 3) {
             O.peerHash = hash;
             O.haveHello = 1;
@@ -963,6 +979,9 @@ static void PeerLine(char *line, int direct)
             }
             if (fields < 5) {
                 O.peerFirstTo = 0;
+            }
+            if (fields < 6) {
+                O.peerRules = 0;
             }
         }
     } else if (strcmp(word, "READY") == 0) {
@@ -979,7 +998,8 @@ static void ReceiveAll(void)
 {
     char buffer[700];
     struct sockaddr_in from;
-    int fromLen, got;
+    socklen_t fromLen;
+    int got;
     for (;;) {
         char *data = buffer;
         int fromServer, direct;
@@ -1043,12 +1063,13 @@ static void StartMatch(void)
     SaveStateLoad(O.start);
     HostSetSimulationMargin(ONLINE_MARGIN);
     g_pcTicksPerFrame = O.ticks;
+    g_pcRules = O.rules;
     HostResetPacing();
     NetplayBegin(&transport, O.role, O.delay);
     O.state = ONLINE_PLAYING;
     O.matchStartMs = NowMs();
-    fprintf(stderr, "online: match %lu against %s, %s, %d ticks a frame\n", (unsigned long)O.matchId, O.peerName,
-            O.direct ? "direct" : "relayed", O.ticks);
+    fprintf(stderr, "online: match %lu against %s, %s, %d ticks a frame, rules %d\n", (unsigned long)O.matchId,
+            O.peerName, O.direct ? "direct" : "relayed", O.ticks, O.rules);
 }
 
 /* The input delay to ask for: the setting, or on Auto the least that leaves rollback a field or two to
@@ -1117,8 +1138,8 @@ static void UpdateSetup(void)
         SendPeerText("PUNCH");
         SendPeerText("PING %lu", (unsigned long)now);
         if (O.start && O.ownDelay >= 0) {
-            SendPeerText("HELLO %d %d %016llx %s %d", HostOwnTicksPerFrame(), O.ownDelay,
-                         (unsigned long long)O.startHash, g_settings.name, g_settings.firstTo);
+            SendPeerText("HELLO %d %d %016llx %s %d %d", HostOwnTicksPerFrame(), O.ownDelay,
+                         (unsigned long long)O.startHash, g_settings.name, g_settings.firstTo, HostOwnRules());
         }
         if (O.sentReady) {
             SendPeerText("READY");
@@ -1133,10 +1154,11 @@ static void UpdateSetup(void)
             SendServer("LEAVE");
             O.matchId = 0;
             O.state = O.serverless ? AfterMatch() : ONLINE_IDLE;
-            Message("Your opponent's game differs from yours (another version of the port or disc).");
+            Message("Your opponent's game differs from yours (another version of the port, system or disc).");
             return;
         }
         O.ticks = O.peerTicks > HostOwnTicksPerFrame() ? O.peerTicks : HostOwnTicksPerFrame();
+        O.rules = O.peerRules & HostOwnRules() & PC_RULE_ALL; /* a rule only both players have on */
         O.delay = O.peerDelay > O.ownDelay ? O.peerDelay : O.ownDelay;
         /* the set: the longer of the two asked for (a hill's match is one bout whatever) */
         O.firstTo = O.mode == ONLINE_KOTH ? 0 : (O.peerFirstTo > g_settings.firstTo ? O.peerFirstTo : g_settings.firstTo);
@@ -1190,7 +1212,7 @@ static void PushLog(void)
     h->matchId = O.matchId;
     h->first = first * samples;
     h->count = count;
-    h->ticks = (uint16_t)O.ticks;
+    h->ticks = (uint16_t)(O.ticks | O.rules << 8);
     h->total = 0;
     sendto(O.sock, packet, (int)(sizeof(SpectateHeader) + count * 4u), 0, (const struct sockaddr *)&O.server,
            sizeof(O.server));
@@ -1296,7 +1318,8 @@ static void TakeLog(const SpectateHeader *h, int size)
     if (!O.W.on || h->matchId != O.W.matchId || size < (int)(sizeof(*h) + h->count * 4u)) {
         return;
     }
-    O.W.ticks = h->ticks ? h->ticks : 1;
+    O.W.ticks = (h->ticks & 0xFF) ? (h->ticks & 0xFF) : 1;
+    O.W.rules = (h->ticks >> 8) & PC_RULE_ALL;
     if (h->total > O.W.total) {
         O.W.total = h->total;
     }
@@ -1423,6 +1446,7 @@ int OnlineWatchField(void)
             HostSetSimulationMargin(ONLINE_MARGIN);
             NetplaySetCardsOff(1);
             g_pcTicksPerFrame = O.W.ticks;
+            g_pcRules = O.W.rules;
             HostResetPacing();
             O.W.running = 1;
             O.W.next = 0;
@@ -1450,6 +1474,7 @@ int OnlineWatchField(void)
         HostSetSimulationMargin(ONLINE_MARGIN);
         NetplaySetCardsOff(1);
         g_pcTicksPerFrame = O.W.ticks;
+        g_pcRules = O.W.rules;
         HostResetPacing();
         O.W.running = 1;
         O.W.next = 0;
@@ -1507,7 +1532,7 @@ int OnlinePlayReplay(const char *file)
         Message("That replay can't be opened.");
         return 0;
     }
-    if (fread(&h, sizeof(h), 1, f) != 1 || memcmp(h.magic, "DJRP", 4) != 0 || h.version != 1 || !h.samples ||
+    if (fread(&h, sizeof(h), 1, f) != 1 || memcmp(h.magic, "DJRP", 4) != 0 || h.version != 2 || !h.samples ||
         h.samples > NETPLAY_MAX_SAMPLES || h.fields > 60 * 60 * 60) {
         fclose(f);
         Message("That isn't a replay this version can read.");
@@ -1520,6 +1545,7 @@ int OnlinePlayReplay(const char *file)
     O.W.have = O.W.total = (uint32_t)fread(O.W.log, sizeof(uint32_t), words, f);
     fclose(f);
     O.W.ticks = (int)h.ticks;
+    O.W.rules = (int)(h.rules & PC_RULE_ALL);
     O.W.ended = O.W.on = O.W.replay = 1;
     snprintf(O.W.names[0], sizeof(O.W.names[0]), "%.23s", h.names[0]);
     snprintf(O.W.names[1], sizeof(O.W.names[1]), "%.23s", h.names[1]);

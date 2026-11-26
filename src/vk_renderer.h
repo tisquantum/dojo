@@ -25,5 +25,12 @@ void VkRendererSetOverlay(const uint32_t *rgba, int changed);
  * memory), and whether presents wait for the display. */
 void VkRendererSetScale(int scale);
 void VkRendererSetVsync(int on);
+/* How the picture is shown (settings.h): `downsample` 0 as drawn, 1 smoothed to the window, 2 brought down
+ * to the console's resolution as sharp pixels; `crt` 0 none, or 1 scanlines, 2 aperture grille, 3 shadow
+ * mask (from the console's resolution too), `curvature` the tube's curved glass with them. */
+void VkRendererSetDisplay(int downsample, int crt, int curvature);
+/* For tests: the picture as the window shows it, at width x height (letterboxed at `aspect`, as
+ * VkRendererPresent's), as 0x00RRGGBB pixels; NULL if too big. */
+const uint32_t *VkRendererCaptureShown(float aspect, int width, int height);
 
 #endif

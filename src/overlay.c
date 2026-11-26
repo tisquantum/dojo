@@ -24,8 +24,9 @@ typedef enum Page {
 
 enum { MAIN_RESUME, MAIN_ONLINE, MAIN_OPTIONS, MAIN_CONTROLS, MAIN_QUIT, MAIN_COUNT };
 enum {
-    OPT_FPS, OPT_SCALE, OPT_ASPECT, OPT_RENDERER, OPT_DISPLAY, OPT_VSYNC, OPT_VOLUME, OPT_COUNTER, OPT_DELAY,
-    OPT_QUICK_PING, OPT_FIRST_TO, OPT_BACK, OPT_COUNT
+    OPT_FPS, OPT_SCALE, OPT_ASPECT, OPT_RENDERER, OPT_DOWNSAMPLE, OPT_CRT, OPT_CURVATURE, OPT_DISPLAY, OPT_VSYNC,
+    OPT_VOLUME, OPT_COUNTER, OPT_DELAY, OPT_QUICK_PING, OPT_FIRST_TO, OPT_FIX_BUGS, OPT_EXTRAS, OPT_BLOOD, OPT_BACK,
+    OPT_COUNT
 };
 /* The controls page: the devices and rumble, then a row of bindings for each console button. */
 enum {
@@ -51,8 +52,8 @@ static char sReplays[REPLAYS_SHOWN][96];
 static int sReplayCount;
 static const char *const sMainLabels[MAIN_COUNT] = {"Resume", "Play online", "Options", "Controls", "Quit game"};
 static const char *const sOptionLabels[OPT_COUNT] = {
-    "Frame rate", "Resolution", "Aspect ratio", "Renderer", "Display", "VSync", "Volume", "Frame counter",
-    "Online input delay", "Quick play ping", "Online set", "Back",
+    "Frame rate", "Resolution", "Aspect ratio", "Renderer", "Downsampling", "CRT", "CRT curvature", "Display",
+    "VSync", "Volume", "Frame counter", "Online input delay", "Quick play ping", "Online set", "Original bugs", "Extras", "Blood", "Back",
 };
 static const char *const sControlLabels[CTL_BIND] = {
     "Player 1 gamepad", "Player 2 gamepad", "Keyboard & mouse", "Left stick moves", "Stick dead zone", "Rumble",
@@ -223,6 +224,27 @@ static void ChangeOption(int dir)
     case OPT_RENDERER:
         s->software = !s->software;
         break;
+    case OPT_DOWNSAMPLE:
+        if (!sContext.vulkan) {
+            return;
+        }
+        s->downsample = Step(s->downsample, dir ? dir : 1, 0, SETTINGS_DOWNSAMPLE_COUNT - 1);
+        sApply(OVERLAY_CHANGE_PICTURE);
+        break;
+    case OPT_CRT:
+        if (!sContext.vulkan) {
+            return;
+        }
+        s->crt = Step(s->crt, dir ? dir : 1, 0, SETTINGS_CRT_COUNT - 1);
+        sApply(OVERLAY_CHANGE_PICTURE);
+        break;
+    case OPT_CURVATURE:
+        if (!sContext.vulkan) {
+            return;
+        }
+        s->crtCurvature = !s->crtCurvature;
+        sApply(OVERLAY_CHANGE_PICTURE);
+        break;
     case OPT_DISPLAY:
         s->fullscreen = !s->fullscreen;
         sApply(OVERLAY_CHANGE_FULLSCREEN);
@@ -238,6 +260,18 @@ static void ChangeOption(int dir)
         break;
     case OPT_COUNTER:
         s->showFps = !s->showFps;
+        break;
+    case OPT_FIX_BUGS:
+        s->fixBugs = !s->fixBugs;
+        sApply(OVERLAY_CHANGE_RULES);
+        break;
+    case OPT_EXTRAS:
+        s->extras = !s->extras;
+        sApply(OVERLAY_CHANGE_RULES);
+        break;
+    case OPT_BLOOD:
+        s->jpBlood = !s->jpBlood;
+        sApply(OVERLAY_CHANGE_RULES);
         break;
     case OPT_DELAY:
         s->onlineDelay = Step(s->onlineDelay, dir ? dir : 1, -1, 8); /* the next match on */
@@ -781,6 +815,23 @@ static void OptionValue(int row, char *out, size_t size)
         snprintf(out, size, "%s%s", s->software ? "Software" : "Vulkan",
                  s->software != sContext.runningSoftware ? "  (on restart)" : "");
         break;
+    case OPT_DOWNSAMPLE: {
+        static const char *const names[SETTINGS_DOWNSAMPLE_COUNT] = {
+            "Off (bilinear)", "Smooth (supersampled to the window)", "Native (the console's pixels, smoothed)"};
+        snprintf(out, size, "%s", !sContext.vulkan ? "Off (software renderer)"
+                                  : s->crt ? "From the console's pixels (the CRT's)" : names[s->downsample]);
+        break;
+    }
+    case OPT_CRT: {
+        static const char *const names[SETTINGS_CRT_COUNT] = {"Off", "Scanlines", "Aperture grille",
+                                                               "Shadow mask"};
+        snprintf(out, size, "%s", !sContext.vulkan ? "Off (software renderer)" : names[s->crt]);
+        break;
+    }
+    case OPT_CURVATURE:
+        snprintf(out, size, "%s%s", s->crtCurvature ? "Curved" : "Flat",
+                 sContext.vulkan && !s->crt ? "  (with a CRT look)" : "");
+        break;
     case OPT_DISPLAY:
         snprintf(out, size, "%s", s->fullscreen ? "Full screen" : "Window");
         break;
@@ -792,6 +843,16 @@ static void OptionValue(int row, char *out, size_t size)
         break;
     case OPT_COUNTER:
         snprintf(out, size, "%s", s->showFps ? "On" : "Off");
+        break;
+    /* The rules: online, each holds when both players have it on (from the next match). */
+    case OPT_FIX_BUGS:
+        snprintf(out, size, "%s", s->fixBugs ? "Fixed (online: if both have it)" : "As released");
+        break;
+    case OPT_EXTRAS:
+        snprintf(out, size, "%s", s->extras ? "On: a hidden stage, two-player Continue (online: if both)" : "Off");
+        break;
+    case OPT_BLOOD:
+        snprintf(out, size, "%s", s->jpBlood ? "Amber, as in Japan (online: if both)" : "Red, as in the USA");
         break;
     case OPT_FIRST_TO:
         if (s->firstTo) {
@@ -1073,7 +1134,9 @@ static void DrawMenu(void)
         char value[96], label[64];
         int selected = row == sRow;
         int locked = sPage == PAGE_OPTIONS &&
-                     ((row == OPT_FPS && sContext.online) || (row == OPT_SCALE && !sContext.vulkan));
+                     ((row == OPT_FPS && sContext.online) ||
+                      ((row == OPT_SCALE || row == OPT_DOWNSAMPLE || row == OPT_CRT || row == OPT_CURVATURE) &&
+                       !sContext.vulkan));
         int binding = sPage == PAGE_CONTROLS && row >= CTL_BIND && row < CTL_BACK;
         if (sPage == PAGE_CONTROLS && row == CTL_BIND) {
             DrawTableHeader(left, y);

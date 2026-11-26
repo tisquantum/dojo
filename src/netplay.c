@@ -17,11 +17,11 @@
  * noticing a desync. */
 
 #define WIN32_LEAN_AND_MEAN
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <SDL3/SDL.h>
+#include "net_compat.h"
 #include "cdrom.h"
 #include "kernel_port.h"
 #include "context.h"
@@ -309,7 +309,7 @@ int NetplayStart(int simMargin, int ticksPerFrame, int *agreedMargin, int *agree
 
     if (strncmp(spec, "host:", 5) == 0) {
         struct sockaddr_in from;
-        int fromLen = sizeof(from);
+        socklen_t fromLen = sizeof(from);
         port = atoi(spec + 5);
         local.sin_port = htons((u_short)port);
         if (bind(N.sock, (struct sockaddr *)&local, sizeof(local)) != 0) {

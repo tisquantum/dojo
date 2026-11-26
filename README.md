@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <b>Bushido Blade on PC.</b> A native Windows port of the 1997 PlayStation sword-fighting game.
+  <b>Bushido Blade on PC.</b> A native Windows and Linux port of the 1997 PlayStation sword-fighting game.
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@ disc image. Don't share builds of the game: `dojo.exe` contains the game's code.
 
 ### What you need
 
-- **Windows 10 or 11, 64-bit.**
+- **Windows 10 or 11, 64-bit**, or **64-bit Linux** (see *Playing on Linux*).
 - **A graphics card with Vulkan 1.3** (any recent NVIDIA, AMD or Intel driver). Without one, the game can use
   its software renderer (Settings → Renderer).
 - **Your own disc image of Bushido Blade (USA)**, ripped as `.bin` + `.cue` (a raw 2352-byte-sector image;
@@ -76,6 +76,40 @@ The release's `decomp` folder is the `dojo` branch of
 [tisquantum/bushido](https://github.com/tisquantum/bushido/tree/dojo) at the commit that version was made with
 (in a checkout, the launcher downloads it). Started without a disc path, `dojo.exe`
 looks for `game_files/Bushido Blade (USA).bin` in the folder it is started from or the two above it.
+
+### Playing on Linux
+
+The game is the same program built for Linux: 32-bit, like the Windows one (the game is 32-bit code through
+and through), so it needs a 64-bit kernel with 32-bit support, glibc 2.38 or newer (the bundled SDL's
+minimum: Ubuntu 24.04, Debian 13, Fedora 39 and later), and the 32-bit graphics, sound and window libraries
+Steam needs too:
+
+- Debian / Ubuntu: `sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install
+  libc6:i386 mesa-vulkan-drivers:i386 libvulkan1:i386 libx11-6:i386 libxext6:i386 libxcursor1:i386
+  libxi6:i386 libxrandr2:i386 libxss1:i386 libxfixes3:i386 libxkbcommon0:i386 libwayland-client0:i386
+  libwayland-cursor0:i386 libwayland-egl1:i386 libdecor-0-0:i386 libasound2t64:i386 libpulse0:i386
+  libpipewire-0.3-0t64:i386 libdrm2:i386 libgbm1:i386 libsndio7.0:i386` (NVIDIA's driver brings its own
+  32-bit Vulkan: install its 32-bit libraries instead of mesa's), and `python3-tk` for the launcher.
+- Arch: enable `[multilib]`, then `sudo pacman -S lib32-glibc lib32-vulkan-icd-loader lib32-mesa
+  lib32-vulkan-radeon` (or `lib32-vulkan-intel`, or `lib32-nvidia-utils`) `lib32-libx11 lib32-libxext
+  lib32-libxcursor lib32-libxi lib32-libxrandr lib32-libxss lib32-libxkbcommon lib32-wayland lib32-libdecor
+  lib32-alsa-lib lib32-libpulse lib32-pipewire tk`.
+
+1. Download `Dojo-<version>-linux.tar.gz` from the [Releases](https://github.com/tisquantum/dojo/releases)
+   page and unpack it anywhere (`tar xf Dojo-<version>-linux.tar.gz`).
+2. In its folder, run **`python3 launcher.pyw`**. The first time, the **Build** tab's **Fetch toolchain**
+   downloads the Linux toolchain (Zig, CMake, Ninja, SDL3, glslang: about 120 MB, each checked by SHA-256).
+3. Then as on Windows: choose your disc image, your settings, and **Play** (the first time builds the game).
+
+Without the launcher: `python3 tools/fetch_toolchain.py`, then
+`toolchain/cmake/bin/cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DDOJO_DECOMP_DIR=decomp
+-DDOJO_DISC=<your disc .bin>`, `toolchain/cmake/bin/cmake --build build`, and `build/dojo "<your disc .bin>"`
+(it finds `libSDL3.so.0` beside it).
+
+Online, Linux players play Linux players: the two builds are different programs, so their simulations can't
+be compared, and quick play pairs each only with its own. Updates don't install themselves on Linux: download
+the new tarball and keep `saves/` and `build/dojo.ini`. DualSense haptics are Windows only (Linux gets the
+controller's rumble).
 
 ### Controls
 
@@ -137,9 +171,28 @@ The launcher's Settings tab and the in-game options menu (**F1**) change the sam
 | `online_first_to` | 0 (no end), 1, 2, 3, 5 | Online matches end when a player wins this many bouts. |
 | `online_delay` | `-1` (auto) or 0 to 8 | Online input delay in fields (1/60 s). Auto measures the round trip while the match is set up and takes the least that leaves rollback a field or two to hide: 0 on a LAN, 1 at about 70 ms, 2 from 100 ms. Both players get the larger of their two choices. |
 | `watch_hill` | 0 / 1 | Watch King of the Hill fights while waiting in line. |
+| `fix_original_bugs` | 0 / 1 | Fix the original game's bugs (below). |
+| `extras` | 0 / 1 | What the disc holds that play never reached: the hidden Stage 18 as a ninth row of VS's stage select, and the unused two-player Continue screen (both players' wins) in two-player VS. |
+| `japanese_blood` | 0 / 1 | The Japanese release's semi-transparent amber blood instead of opaque red. |
+| `downsample` | `off`, `smooth`, `native` | How the picture, drawn at `scale` times the console's resolution, reaches the window (Vulkan only). `off`: filtered (bilinear). `smooth`: each pixel of the window the average of all the drawn pixels it covers, which is supersampling (anti-aliasing) when the picture is drawn finer than the window shows it (a high `scale`). `native`: brought down to the console's own resolution (each console pixel the average of the `scale` x `scale` drawn under it, so edges stay smooth), then shown as sharp square pixels. |
+| `crt` | `off`, `scanlines`, `aperture`, `mask` | A CRT television's look (Vulkan only), from the picture at the console's resolution: each line a beam whose spot widens with its brightness, the gaps between lines dark; `aperture` adds an aperture grille's vertical phosphor stripes, `mask` a shadow mask's staggered triads, at the window's own pixels. Best full screen at a high resolution. |
+| `crt_curvature` | 0 / 1 | The CRT's glass curved, its corners rounded and darkened. |
 
-Frame rate, resolution, full screen, v-sync, volume and the frame counter apply at once; aspect ratio and
-renderer on the next start.
+The last three are the *rules*: all off is the original game. They change the game itself, so online a rule
+holds only when both players have it on; replays and watched matches carry the match's. Offline they apply at
+once. The bugs fixed, each from the decompilation's `docs/findings.md` and each under `PC_FIX_BUGS` in the
+game's code: the computer never evading (`IsWeaponSwingPlaneVertical` compared unsigned); a crippled left arm
+leaving its upper half hittable and the right upper arm not; striking a defeated fighter scarring player one;
+the computer's flank check probing one side twice; Katze never sidestepping down; hit spheres' squared radii
+scaled by the stature rather than its square; Slash and first-person opponents losing their scaled clash
+power on the first frame; a cut prop missing from the instant replay; a point light reaching any distance
+once an offset is large; Executioner's Cove's wave edge sampled from the next column; and the opening's
+tinted palettes scaling green and blue from the tinted red. Left as they are, the intent being unclear: the
+ring-out credit, the bosses' wound textures, the snow restart list, a thrown item's sound side, equal clash
+power, Katze's muzzle-flash blending and the first-person mannequin's joints.
+
+Frame rate, resolution, downsampling, the CRT look, full screen, v-sync, volume and the frame counter apply
+at once; aspect ratio and renderer on the next start.
 
 ### Online
 
@@ -170,7 +223,12 @@ on the version that made them).
 
 Working from a checkout of this repository: `python tools/fetch_toolchain.py` downloads the toolchain into
 `toolchain/` (llvm-mingw for 32-bit x86, CMake, Ninja, embeddable Python, SDL3, the Vulkan headers and glslang,
-each checked by SHA-256), then `python launcher.pyw` works as the release's `Dojo.exe` does. Everyone builds
+each checked by SHA-256), then `python launcher.pyw` works as the release's `Dojo.exe` does. On Linux the same
+script fetches the Linux toolchain: Zig 0.14.1 (whose Clang builds for 32-bit x86 Linux against glibc 2.31,
+with its own glibc headers and stubs), CMake, Ninja, Debian's 32-bit SDL 3.2.10 (the same version as Windows')
+and glslang; the system's Python runs the build's scripts. `DOJO_PLATFORM=linux` (CMake) builds the Linux game
+on Windows too, from a toolchain folder holding Zig, glslang, CMake, Ninja and Python for Windows and the
+Linux SDL3 (`deps/SDL3/i686-linux-gnu`): a check that it compiles and links, not a way to run it. Everyone builds
 with the same tools and the build is reproducible (no timestamps or folder names in the program), so a given
 version builds to the same bytes on every PC, which online play relies on. `python tools/make_release.py`
 makes the release zip in `dist/` (it needs PyInstaller for `Dojo.exe`), plus `Dojo-<version>-update.zip` and
@@ -227,16 +285,23 @@ builds and lists what the link still lacks. Scripted runs use environment variab
 `DOJO_FAST` (no real-time pacing), `DOJO_ONLINE` (`quick`, `create`, `join:CODE`, `koth`,
 `koth:CODE`: online play from a script), `DOJO_SERVER`, `DOJO_NO_DIRECT` (always relay), `DOJO_MENU_AT` (open the options menu at a field and save its
 picture), `DOJO_APPLY_AT` (`field:scale=N,field:vsync=N,field:fps=N`, settings changed mid-run), `DOJO_HASH_EVERY` (log the simulation's hash), `DOJO_STATE_TEST=F,G`
-(save at F, run to G, restore and run again, compare), `DOJO_DUMP_STATE=F` (the state, its regions on
+(save at F, run to G, restore and run again, compare), `DOJO_DUMP_STATE=F[,F...]` (the state, its regions on
 stderr), `DOJO_DUMP_DESYNC` (netplay saves its state before a field the two machines disagree on, as
 `desync_p<player>_<field>.bin`), `DOJO_PRESS_TICKS=seed` (the local controller changes from one tick's
 sample to the next, for testing netplay's per-tick input), `DOJO_DUMP_SETTLED=field` and `DOJO_DUMP_WATCH=field`
 (a player's settled state before that field, a spectator's; `all` for every checked field to 600), and
-`DOJO_QUICK_MAX_PING`, `DOJO_FIRST_TO` (those settings, for a test), `DOJO_LOG_FPS` (the frame counter to the log), `DOJO_DISPLAY_HZ` (as if the display ran at that rate), `DOJO_KEEP_SETTINGS` (a hidden or scripted run reads and writes dojo.ini after all, for testing it), `DOJO_REPLAY=file` (plays a replay from
+`DOJO_QUICK_MAX_PING`, `DOJO_FIRST_TO` (those settings, for a test), `DOJO_RULES` (the rules as bits: 1 bugs
+fixed, 2 extras, 4 Japanese blood; a `DOJO_NET` test's two machines must be given the same), `DOJO_LOG_FPS` (the frame counter to the log), `DOJO_DISPLAY_HZ` (as if the display ran at that rate), `DOJO_KEEP_SETTINGS` (a hidden or scripted run reads and writes dojo.ini after all, for testing it), `DOJO_REPLAY=file` (plays a replay from
 `replays/`), `DOJO_HIDDEN` (no window on the screen, the software renderer and the default settings, dojo.ini neither read
-nor written: for tests run while someone uses the machine). Release builds write no PDB, so for
+nor written: for tests run while someone uses the machine; with `DOJO_RENDERER=vulkan`, Vulkan draws into a
+hidden window it never presents to), `DOJO_DOWNSAMPLE`, `DOJO_CRT`, `DOJO_CRT_CURVATURE` (those settings),
+`DOJO_SHOT_SHOWN=WxH` (`DOJO_SHOT_EVERY`'s pictures as the window shows them, display mode and all, at that
+size, rather than the drawn picture). Release builds write no PDB, so for
 `tools/statediff.py` build RelWithDebInfo, or the names it gives come from an older build. `tools/statediff.py` compares two dumps variable by variable through the builds' PDBs (pointers by
-what they name), so a build can be checked against an older one even when variables were added.
+what they name), so a build can be checked against an older one even when variables were added. `tools/simcheck.py [--base REF]` does the whole check: it builds the
+decompilation at REF (default HEAD) and as it stands, plays both through the same scripted VS bout (a fight, its
+replay, victory, Continue and the next bout) and compares their states at fields along the way; run it after
+every upstream sync and before a release, and raise `SIM_REVISION` (src/online.c) when it says the simulation differs.
 `-DDOJO_TRACE=ON` keeps a call stack of the game's functions for crash reports; crashes print addresses to
 resolve with `llvm-symbolizer --obj=port/build/dojo.exe`.
 
@@ -276,7 +341,21 @@ delay slots, the stack arguments of the MIPS ABI and GTE instructions are handle
 
 **Hardware registers.** LIBSPU and LIBSND drive the sound processor through its registers, as they do on the
 console. The I/O page is mapped read-only at 0x1F801000, kept current by the emulated devices; every write
-faults, and the handler decodes the store and hands it to the device (`src/mmio.c`).
+faults, and the handler decodes the store and hands it to the device (`src/mmio.c`: a vectored exception
+handler on Windows, a SIGSEGV handler on Linux, over two views of one piece of shared memory).
+
+**Linux.** The same code, with the system's equivalents where Windows had its own: `mmap` for the console's
+memory, signals for the register faults and crash reports, BSD sockets (`src/net_compat.h`), and a context
+switch without Windows' exception-chain bookkeeping (`src/context.c`). The program is linked at 0x400000 too,
+not position-independent; COFF's ordered `$` sections, which gather the simulation's variables for save
+states, are gathered by a few lines of linker script on ELF (`linux.ld`). Its states differ from the Windows
+build's (other code, other addresses), so online the disc identity a player is matched by carries the system
+too, and each plays its own.
+
+**Display.** The Vulkan renderer draws the picture at `scale` times the console's resolution; the display
+modes take it from there (`shaders/present.frag`): filtered as it is, averaged down to the window
+(supersampling), or brought down to the console's resolution first (`shaders/downsample.frag`, a box filter in
+linear light) and shown as sharp pixels or through a CRT's scanlines and phosphor mask.
 
 **Movies.** The player (`src/movie.c`) streams each STR file with `CdRead2` and LIBCD's ring, decodes a frame's
 bitstream with LIBPRESS's `DecDCTvlc` and has the MDEC turn it into pixels. The drive reads at the console's

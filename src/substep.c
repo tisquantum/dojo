@@ -5,6 +5,7 @@
 /* The setting is not state: an online match's machines agree on it. */
 #pragma clang section bss = ".bss$render" data = ".data$render"
 int g_pcTicksPerFrame = 1;
+int g_pcRules; /* pc_rules.h: agreed the same way */
 #pragma clang section bss = ".bss$sim" data = ".data$sim"
 
 /* A frame that doesn't substep is one tick, 0 of 1, whatever the setting: such frames are the same state at

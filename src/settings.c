@@ -8,6 +8,8 @@
 #include "input.h"
 
 const char *const SETTINGS_ASPECTS[SETTINGS_ASPECT_COUNT] = {"auto", "4:3", "16:10", "16:9", "21:9", "24:10", "32:9"};
+const char *const SETTINGS_DOWNSAMPLES[SETTINGS_DOWNSAMPLE_COUNT] = {"off", "smooth", "native"};
+const char *const SETTINGS_CRTS[SETTINGS_CRT_COUNT] = {"off", "scanlines", "aperture", "mask"};
 
 Settings g_settings = {0, 4, SETTINGS_ASPECT_AUTO, 0, 0, 0, 100, 0, 0, 50, 100, 1, 0, {"auto", "auto"}, {"", ""}, {{0}},
                        "", "dojo-matchmaker.fly.dev:7777", 7778, 1, 0, -1, 160, 0};
@@ -25,6 +27,21 @@ static const struct {
     {"rumble", &g_settings.rumble},     {"dualsense_haptics", &g_settings.haptics},
     {"online_delay", &g_settings.onlineDelay},  {"quick_max_ping", &g_settings.quickMaxPing},
     {"online_first_to", &g_settings.firstTo},
+    {"fix_original_bugs", &g_settings.fixBugs}, {"extras", &g_settings.extras},
+    {"japanese_blood", &g_settings.jpBlood},
+    {"crt_curvature", &g_settings.crtCurvature},
+};
+
+/* The settings that are one of a list of names. */
+static const struct {
+    const char *key;
+    int *value;
+    const char *const *names;
+    int count;
+} sChoices[] = {
+    {"aspect", &g_settings.aspect, SETTINGS_ASPECTS, SETTINGS_ASPECT_COUNT},
+    {"downsample", &g_settings.downsample, SETTINGS_DOWNSAMPLES, SETTINGS_DOWNSAMPLE_COUNT},
+    {"crt", &g_settings.crt, SETTINGS_CRTS, SETTINGS_CRT_COUNT},
 };
 
 /* The settings that are text. */
@@ -43,7 +60,7 @@ static const struct {
 
 static void DefaultName(void)
 {
-    const char *user = SDL_getenv("USERNAME");
+    const char *user = SDL_getenv("USERNAME") ? SDL_getenv("USERNAME") : SDL_getenv("USER");
     size_t i, n = 0;
     for (i = 0; user && user[i] && n < sizeof(g_settings.name) - 1; i++) {
         char c = user[i];
@@ -118,12 +135,18 @@ void SettingsLoad(int scripted)
             }
             continue;
         }
-        if (strcmp(key, "aspect") == 0) {
-            for (i = 0; i < SETTINGS_ASPECT_COUNT; i++) {
-                if (strcmp(value, SETTINGS_ASPECTS[i]) == 0) {
-                    g_settings.aspect = (int)i;
+        for (i = 0; i < sizeof(sChoices) / sizeof(sChoices[0]); i++) {
+            if (strcmp(key, sChoices[i].key) == 0) {
+                int c;
+                for (c = 0; c < sChoices[i].count; c++) {
+                    if (strcmp(value, sChoices[i].names[c]) == 0) {
+                        *sChoices[i].value = c;
+                    }
                 }
+                found = 1;
             }
+        }
+        if (found) {
             continue;
         }
         for (i = 0; i < sizeof(sKeys) / sizeof(sKeys[0]); i++) {
@@ -141,6 +164,10 @@ void SettingsLoad(int scripted)
     g_settings.onlineDelay = Clamp(g_settings.onlineDelay, -1, 8);
     g_settings.quickMaxPing = Clamp(g_settings.quickMaxPing, 0, 1000);
     g_settings.firstTo = Clamp(g_settings.firstTo, 0, 9);
+    g_settings.fixBugs = Clamp(g_settings.fixBugs, 0, 1);
+    g_settings.extras = Clamp(g_settings.extras, 0, 1);
+    g_settings.jpBlood = Clamp(g_settings.jpBlood, 0, 1);
+    g_settings.crtCurvature = Clamp(g_settings.crtCurvature, 0, 1);
 }
 
 void SettingsSave(void)
@@ -151,7 +178,9 @@ void SettingsSave(void)
         return;
     }
     fprintf(f, "; Dojo: the options menu (F1) writes this file.\n");
-    fprintf(f, "aspect = %s\n", SETTINGS_ASPECTS[g_settings.aspect]);
+    for (i = 0; i < sizeof(sChoices) / sizeof(sChoices[0]); i++) {
+        fprintf(f, "%s = %s\n", sChoices[i].key, sChoices[i].names[*sChoices[i].value]);
+    }
     for (i = 0; i < sizeof(sTexts) / sizeof(sTexts[0]); i++) {
         fprintf(f, "%s = %s\n", sTexts[i].key, sTexts[i].value);
     }

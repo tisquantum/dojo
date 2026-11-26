@@ -11,6 +11,10 @@ Beside it go Dojo-<version>-update.zip (the same without the toolchain, which ra
 dojo-update.json, the manifest the launcher reads from the latest release to update itself. Upload all three to
 the GitHub release (tag v<version>): a release without dojo-update.json isn't seen by the launchers out there.
 
+Dojo-<version>-linux.tar.gz is for Linux: the same source and decomp/, without Dojo.exe or the toolchain. A
+player runs `python3 launcher.pyw` in it, whose Build tab fetches the Linux toolchain (tools/fetch_toolchain.py)
+the first time. Upload it too.
+
     python tools/make_release.py            (needs PyInstaller: pip install pyinstaller)
 """
 
@@ -21,6 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import urllib.request
 import zipfile
 
@@ -168,9 +173,28 @@ def main():
     }
     with open(os.path.join(DIST, "dojo-update.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
-    for path in (archive, update):
+    linux = os.path.join(DIST, "%s-linux.tar.gz" % name)
+    print("packing", linux, flush=True)
+    tar_folder(stage, linux, name + "/", skip=("toolchain", "Dojo.exe", "THIRD_PARTY.md"))
+    for path in (archive, update, linux):
         print("done: %s (%.0f MB)" % (path, os.path.getsize(path) / 1e6))
-    print("upload both zips and dist/dojo-update.json to the release v%s" % ver)
+    print("upload both zips, the Linux tarball and dist/dojo-update.json to the release v%s" % ver)
+
+
+def tar_folder(folder, archive, prefix, skip=()):
+    """A tarball for Linux: the scripts executable, everything else plain files, owned by nobody in particular."""
+    def clean(info):
+        info.uid = info.gid = 0
+        info.uname = info.gname = ""
+        if info.isfile():
+            info.mode = 0o755 if info.name.endswith((".pyw", ".py", ".sh")) else 0o644
+        return info
+
+    with tarfile.open(archive, "w:gz", compresslevel=9) as t:
+        for entry in sorted(os.listdir(folder)):
+            if entry in skip:
+                continue
+            t.add(os.path.join(folder, entry), prefix + entry, filter=clean)
 
 
 def zip_folder(folder, archive, prefix, skip=None):

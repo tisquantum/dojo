@@ -14,6 +14,7 @@
 #include "psxport.h"
 #include "savestate.h"
 
+#ifdef _WIN32
 /* The markers: COFF orders grouped sections by the text after '$', and "sia" < "sim" < "siz". */
 #pragma clang section bss = ".bss$sia" data = ".data$sia"
 __attribute__((aligned(16))) static char sDataBegin[16] = {1};
@@ -22,6 +23,14 @@ __attribute__((aligned(16))) static char sBssBegin[16];
 __attribute__((aligned(16))) static char sDataEnd[16] = {1};
 __attribute__((aligned(16))) static char sBssEnd[16];
 #pragma clang section bss = "" data = ""
+#else
+/* ELF: the linker gathers the sections in runs of their own, between these (linux.ld). */
+extern char dojo_sim_data_begin[], dojo_sim_data_end[], dojo_sim_bss_begin[], dojo_sim_bss_end[];
+#define sDataBegin dojo_sim_data_begin
+#define sDataEnd   dojo_sim_data_end
+#define sBssBegin  dojo_sim_bss_begin
+#define sBssEnd    dojo_sim_bss_end
+#endif
 
 #define IO_PAGE      0x1F801000u
 #define IO_PAGE_SIZE 0x1000u

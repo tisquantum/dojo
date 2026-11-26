@@ -715,7 +715,7 @@ class Translator:
         rows = []
         for i in range(0, len(blob), 16):
             rows.append("    " + ", ".join(f"0x{b:02X}" for b in blob[i:i + 16]) + ",")
-        decls = [f"static __declspec(align(16)) u8 sData[{max(len(blob), 4)}] = {{"] + rows + ["};"]
+        decls = [f"static __attribute__((aligned(16))) u8 sData[{max(len(blob), 4)}] = {{"] + rows + ["};"]
         return decls, inits
 
     # -- output ----------------------------------------------------------------------------------------
@@ -813,7 +813,14 @@ class Translator:
             out.append(f'    "{escaped}",')
         out.append("};")
         out.append("static u32 sSite;")
+        # the executable's first byte: the PE linker's __ImageBase, the ELF linker's __executable_start
+        out.append("#ifdef _WIN32")
         out.append("extern char __ImageBase;")
+        out.append("#define IMAGE_START (&__ImageBase)")
+        out.append("#else")
+        out.append("extern char __executable_start;")
+        out.append("#define IMAGE_START (&__executable_start)")
+        out.append("#endif")
         out.append("void AsmBadJump(u32 pc, const char *site, const u32 *regs);")
         out.append("")
         out.append("static void Run(u32 pc)")
@@ -835,7 +842,7 @@ class Translator:
         out.append("        u32 id = LookupCode(pc);")
         out.append("        if (id != 0) { pc = id; goto dispatch; }")
         out.append("        /* A C function reached through a table or a tail call: call it, return through ra. */")
-        out.append("        if (pc < ADDR(&__ImageBase) || pc >= ADDR(&__ImageBase) + 0x1000000u) {")
+        out.append("        if (pc < ADDR(IMAGE_START) || pc >= ADDR(IMAGE_START) + 0x1000000u) {")
         out.append("            AsmBadJump(pc, sSiteText[sSite], R);")
         out.append("        }")
         out.append("        R[2] = ((u32 (*)(u32, u32, u32, u32))PTR(pc))(R[4], R[5], R[6], R[7]);")

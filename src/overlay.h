@@ -29,6 +29,8 @@ typedef enum OverlayChange {
     OVERLAY_CHANGE_FULLSCREEN,
     OVERLAY_CHANGE_VSYNC,
     OVERLAY_CHANGE_VOLUME,
+    OVERLAY_CHANGE_RULES,
+    OVERLAY_CHANGE_PICTURE, /* the downsampling or the CRT look */
     OVERLAY_CHANGE_QUIT,
 } OverlayChange;
 
