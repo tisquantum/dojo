@@ -16,6 +16,10 @@
   <a href="LICENSE"><img alt="license MIT" src="https://img.shields.io/badge/license-MIT-2EA043"></a>
 </p>
 
+<p align="center">
+  <a href="https://recomplauncher.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+</p>
+
 ---
 
 Dojo is built from the game's decompiled source, with things the console never had: real frame rates above the

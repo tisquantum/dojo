@@ -1,0 +1,138 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "Dojo",
+  "repo": "tisquantum/dojo",
+  "inputs": [
+    {
+      "id": "game",
+      "label": "Your disc image of Bushido Blade (USA), serial SCUS-94180: pick the .cue file, with its .bin beside it.",
+      "formats": [{ "type": "file", "extensions": ["cue", "bin"] }, { "type": "folder" }],
+      "check": { "iso9660": "SCUS_941.80" },
+      "dumps": [
+        { "name": "USA", "size": 582258768, "crc32": "db065489" }
+      ]
+    }
+  ],
+  "start": {
+    "program": ["Dojo.exe"],
+    "args": ["--play", "{input:game}"]
+  },
+  "prepare": {
+    "program": ["Dojo.exe"],
+    "args": ["--prepare", "--game", "{input:game}"],
+    "label": "Building the game from its source and your disc",
+    "done": ["{install}/build/dojo.exe"]
+  },
+  "system": {
+    "windows": { "version": "10", "graphics": { "vulkan": "1.3" } }
+  },
+  "config": [
+    { "id": "main", "format": "ini", "file": [{ "path": "{install}/build/dojo.ini" }] }
+  ],
+  "saves": ["{install}/saves", "{install}/build/dojo.ini"],
+  "folders": {
+    "game": [{ "path": "{install}" }],
+    "saves": [{ "path": "{install}/saves" }]
+  },
+  "actions": [
+    { "id": "saves", "label": "Saves", "help": "Your memory cards.", "open": "saves" }
+  ],
+  "settings": [
+    {
+      "id": "fps", "label": "Frame rate", "group": "Picture",
+      "help": "The game's own logic runs this often, nothing is interpolated. 30 is the console's. Online, both players run the higher of their two.",
+      "choices": [
+        { "label": "Match my display", "set": { "fps": "0" } },
+        { "label": "30 (original)", "set": { "fps": "30" } },
+        { "label": "60", "set": { "fps": "60" } },
+        { "label": "120", "set": { "fps": "120" } },
+        { "label": "150", "set": { "fps": "150" } },
+        { "label": "240", "set": { "fps": "240" } }
+      ],
+      "defaults": { "fps": "0" }
+    },
+    {
+      "id": "aspect", "label": "Aspect ratio", "group": "Picture",
+      "help": "Widescreen draws more of the stage at the sides. Takes effect on the next start.",
+      "choices": [
+        { "label": "Match my display", "set": { "aspect": "auto" } },
+        { "label": "4:3 (original)", "set": { "aspect": "4:3" } },
+        { "label": "16:10", "set": { "aspect": "16:10" } },
+        { "label": "16:9", "set": { "aspect": "16:9" } },
+        { "label": "21:9", "set": { "aspect": "21:9" } },
+        { "label": "32:9", "set": { "aspect": "32:9" } }
+      ],
+      "defaults": { "aspect": "auto" }
+    },
+    {
+      "id": "scale", "label": "Resolution", "group": "Picture",
+      "help": "Drawn at this many times the console's 320x240.",
+      "choices": [
+        { "label": "1x", "set": { "scale": "1" } },
+        { "label": "2x", "set": { "scale": "2" } },
+        { "label": "3x", "set": { "scale": "3" } },
+        { "label": "4x", "set": { "scale": "4" } },
+        { "label": "6x", "set": { "scale": "6" } },
+        { "label": "8x", "set": { "scale": "8" } }
+      ],
+      "defaults": { "scale": "4" }
+    },
+    {
+      "id": "fullscreen", "label": "Full screen", "group": "Picture",
+      "help": "Play full screen. F11 switches in the game.",
+      "choices": [
+        { "label": "Off", "set": { "fullscreen": "0" } },
+        { "label": "On", "set": { "fullscreen": "1" } }
+      ],
+      "defaults": { "fullscreen": "0" }
+    },
+    {
+      "id": "vsync", "label": "V-Sync", "group": "Picture",
+      "help": "Wait for the display so the picture never tears.",
+      "choices": [
+        { "label": "Off", "set": { "vsync": "0" } },
+        { "label": "On", "set": { "vsync": "1" } }
+      ],
+      "defaults": { "vsync": "0" }
+    },
+    {
+      "id": "crt", "label": "CRT look", "group": "Picture",
+      "help": "A television's scanlines and phosphors. Best full screen at a high resolution.",
+      "choices": [
+        { "label": "Off", "set": { "crt": "off" } },
+        { "label": "Scanlines", "set": { "crt": "scanlines" } },
+        { "label": "Aperture grille", "set": { "crt": "aperture" } },
+        { "label": "Shadow mask", "set": { "crt": "mask" } }
+      ],
+      "defaults": { "crt": "off" }
+    },
+    {
+      "id": "bugs", "label": "Fix the original's bugs", "group": "Rules",
+      "help": "Changes the game itself. Online, a rule holds only when both players have it on.",
+      "choices": [
+        { "label": "Off (original)", "set": { "fix_original_bugs": "0" } },
+        { "label": "On", "set": { "fix_original_bugs": "1" } }
+      ],
+      "defaults": { "fix_original_bugs": "0" }
+    },
+    {
+      "id": "extras", "label": "Extras", "group": "Rules",
+      "help": "What the disc holds that play never reached: the hidden stage, an Open World row in VS and the two-player Continue screen.",
+      "choices": [
+        { "label": "Off (original)", "set": { "extras": "0" } },
+        { "label": "On", "set": { "extras": "1" } }
+      ],
+      "defaults": { "extras": "0" }
+    },
+    {
+      "id": "blood", "label": "Amber blood", "group": "Rules",
+      "help": "The Japanese release's semi-transparent amber blood instead of opaque red.",
+      "choices": [
+        { "label": "Off (original)", "set": { "japanese_blood": "0" } },
+        { "label": "On", "set": { "japanese_blood": "1" } }
+      ],
+      "defaults": { "japanese_blood": "0" }
+    }
+  ]
+}

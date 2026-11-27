@@ -11,6 +11,9 @@ Beside it go Dojo-<version>-update.zip (the same without the toolchain, which ra
 dojo-update.json, the manifest the launcher reads from the latest release to update itself. Upload all three to
 the GitHub release (tag v<version>): a release without dojo-update.json isn't seen by the launchers out there.
 
+recomplauncher.json (RecompLauncher's setup file) is among the repository's files, so it sits beside Dojo.exe in
+both zips. Dojo.exe --prepare / --play are what it runs; the Linux tarball has neither, so it leaves the file out.
+
 Dojo-<version>-linux.tar.gz is for Linux: the same source and decomp/, without Dojo.exe or the toolchain. A
 player runs `python3 launcher.pyw` in it, whose Build tab fetches the Linux toolchain (tools/fetch_toolchain.py)
 the first time. Upload it too.
@@ -175,7 +178,7 @@ def main():
         json.dump(manifest, f, indent=2)
     linux = os.path.join(DIST, "%s-linux.tar.gz" % name)
     print("packing", linux, flush=True)
-    tar_folder(stage, linux, name + "/", skip=("toolchain", "Dojo.exe", "THIRD_PARTY.md"))
+    tar_folder(stage, linux, name + "/", skip=("toolchain", "Dojo.exe", "THIRD_PARTY.md", "recomplauncher.json"))
     for path in (archive, update, linux):
         print("done: %s (%.0f MB)" % (path, os.path.getsize(path) / 1e6))
     print("upload both zips, the Linux tarball and dist/dojo-update.json to the release v%s" % ver)
