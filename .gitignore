@@ -36,3 +36,6 @@ dist/
 update.new/
 update.failed
 update.zip.part
+
+# Store art for the release page (not part of the repo).
+art/
