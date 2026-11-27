@@ -52,7 +52,8 @@ SAVES = os.path.join(PORT_DIR, "saves")
 # another manifest (and turns updates on in a checkout, which otherwise never updates itself: git does that).
 UPDATE_MANIFEST = os.environ.get("DOJO_UPDATE_URL") or \
     "https://github.com/tisquantum/dojo/releases/latest/download/dojo-update.json"
-UPDATES = getattr(sys, "frozen", False) or bool(os.environ.get("DOJO_UPDATE_URL"))
+# RecompLauncher (RECOMPLAUNCHER=1) brings every release itself: two updaters on one folder would fight.
+UPDATES = (getattr(sys, "frozen", False) or bool(os.environ.get("DOJO_UPDATE_URL"))) and     not os.environ.get("RECOMPLAUNCHER")
 UPDATE_STAGE = os.path.join(PORT_DIR, "update.new")
 UPDATE_LOG = os.path.join(PORT_DIR, "update.log")
 UPDATE_FAILED = os.path.join(PORT_DIR, "update.failed")
@@ -697,6 +698,165 @@ def decomp_commit(path):
         return None
 
 
+def build_env():
+    """The environment the build runs in: only the bundled tools (on Linux, but the shell and Python)."""
+    env = dict(os.environ)
+    if WINDOWS:
+        env["PATH"] = os.pathsep.join([os.path.join(TOOLCHAIN, "llvm-mingw", "bin"),
+                                       os.path.join(TOOLCHAIN, "ninja"),
+                                       os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")])
+    else:
+        env["PATH"] = os.pathsep.join([os.path.join(TOOLCHAIN, "ninja"), "/usr/bin", "/bin"])
+    return env
+
+
+def cmake_configure(build_type, decomp, disc):
+    """CMake's configure command for the game; a stale cache is cleared first."""
+    configure = [CMAKE, "-S", PORT_DIR, "-B", BUILD_DIR, "-G", "Ninja",
+                 "-DCMAKE_BUILD_TYPE=" + build_type,
+                 "-DDOJO_DECOMP_DIR=" + os.path.abspath(decomp),
+                 "-DDOJO_DISC=" + os.path.abspath(disc)]
+    cache = os.path.join(BUILD_DIR, "CMakeCache.txt")
+    if os.path.isfile(cache):
+        # A cache from before the bundled toolchain, from a configure that failed to find the compiler
+        # (no compiler flags, so no optimisation), or from where this folder was before it was moved or
+        # renamed (CMake refuses one made elsewhere) is started over. dojo.ini and the rest stay.
+        with open(cache, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        home = re.search(r"^CMAKE_HOME_DIRECTORY:INTERNAL=(.*)$", text, re.M)
+        moved = home is not None and \
+            os.path.normcase(os.path.normpath(home.group(1).strip())) != os.path.normcase(os.path.normpath(PORT_DIR))
+        if "CMAKE_C_FLAGS_%s:STRING=\n" % build_type.upper() in text or \
+                ("i686-w64-mingw32-clang" if WINDOWS else "zig-cc") not in text or moved:
+            os.remove(cache)
+            shutil.rmtree(os.path.join(BUILD_DIR, "CMakeFiles"), ignore_errors=True)
+    return configure
+
+
+# -- without a window: RecompLauncher ---------------------------------------------------------------------------
+# recomplauncher.json runs `Dojo.exe --prepare --game DISC` (builds the game, printing `progress` lines) and
+# `Dojo.exe --play DISC` (starts it). Nothing here runs unless one of those is given.
+
+def console():
+    """stdout and stderr for a windowless run: the launcher is a windowed program, but a pipe it was started with is
+    still its standard handle."""
+    if sys.stdout is not None:
+        return
+    handle = None
+    if WINDOWS:
+        import ctypes
+        import msvcrt
+        value = ctypes.windll.kernel32.GetStdHandle(-11)
+        if value not in (None, 0, -1, ctypes.c_void_p(-1).value):
+            handle = msvcrt.open_osfhandle(value, os.O_WRONLY)
+    sys.stdout = sys.stderr = open(handle, "w", encoding="utf-8", errors="replace", buffering=1)         if handle is not None else open(os.devnull, "w")
+
+
+def read_config():
+    try:
+        with open(LAUNCHER_JSON, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def write_config(**changes):
+    config = read_config()
+    config.update(changes, version=2)
+    try:
+        with open(LAUNCHER_JSON, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+    except OSError:
+        pass
+
+
+def headless_disc(path):
+    """The .bin for a disc given on the command line, or None after saying why not."""
+    disc, note = resolve_disc(path)
+    if disc is None:
+        print(note)
+        return None
+    ok, note = looks_like_disc(disc)
+    if not ok:
+        print(note)
+        return None
+    return disc
+
+
+def prepare(path):
+    """Builds the game from the decompilation and the disc, as the Build tab does."""
+    disc = headless_disc(path)
+    if disc is None:
+        return 1
+    config = read_config()
+    if os.path.isfile(EXE) and config.get("built_version") == DOJO_VERSION:
+        print("progress 1 Already built")
+        return 0
+    decomp = config.get("decomp") or DECOMP_DIR
+    if not (os.path.isfile(os.path.join(decomp, "src", "main.c")) and
+            os.path.isfile(os.path.join(decomp, "include", "substep.h"))):
+        print("The game's source isn't in %s. Download Dojo again, keeping the whole folder together." % decomp)
+        return 1
+    if not toolchain_version():
+        print("The build tools (the toolchain folder) are missing. Download Dojo again, keeping the whole folder "
+              "together.")
+        return 1
+    write_config(built_version="", disc=os.path.abspath(path))   # until it has finished, it isn't built
+    env = build_env()
+    print("progress 0.02 Setting up the build")
+    for step, (command, low, high) in enumerate([(cmake_configure("Release", decomp, disc), 0.02, 0.05),
+                                                 ([CMAKE, "--build", BUILD_DIR], 0.05, 1.0)]):
+        process = subprocess.Popen(command, cwd=PORT_DIR, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, errors="replace", creationflags=NO_WINDOW)
+        tail = []
+        for line in process.stdout:
+            line = line.rstrip()
+            tail = (tail + [line])[-10:]
+            ninja = re.match(r"\[(\d+)/(\d+)\]", line)
+            if ninja:
+                done, total = int(ninja.group(1)), int(ninja.group(2))
+                print("progress %.2f Building the game (%d of %d)" % (low + (high - low) * done / max(total, 1),
+                                                                      done, total))
+            else:
+                print(line)
+        if process.wait() != 0:
+            print("\n".join(tail))
+            print("The build failed (see above). Press Set Up again; if it keeps failing, send this log to the Dojo "
+                  "Discord.")
+            return 1
+    if not os.path.isfile(EXE):
+        print("The build finished without making the game.")
+        return 1
+    write_config(built_version=DOJO_VERSION)
+    print("progress 1 Built")
+    return 0
+
+
+def play(path):
+    """Runs the built game on the disc and waits for it, its output in dojo.log as when the window starts it."""
+    disc = headless_disc(path)
+    if disc is None:
+        return 1
+    if not os.path.isfile(EXE):
+        print("The game hasn't been built yet. Set it up first.")
+        return 1
+    with open(GAME_LOG, "w", encoding="utf-8", errors="replace") as log:
+        return subprocess.call([EXE, os.path.abspath(disc)], cwd=PORT_DIR, stdout=log, stderr=subprocess.STDOUT,
+                               creationflags=NO_WINDOW)
+
+
+def headless(args):
+    """The exit code of a windowless run, or None when the arguments don't ask for one."""
+    if args[:1] == ["--prepare"] and len(args) == 3 and args[1] == "--game":
+        run = prepare
+    elif args[:1] == ["--play"] and len(args) == 2:
+        run = play
+    else:
+        return None
+    console()
+    return run(args[-1])
+
+
 # -- the window -----------------------------------------------------------------------------------------------
 
 class Launcher:
@@ -1295,24 +1455,7 @@ class Launcher:
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
 
-        configure = [CMAKE, "-S", PORT_DIR, "-B", BUILD_DIR, "-G", "Ninja",
-                     "-DCMAKE_BUILD_TYPE=" + self.build_type.get(),
-                     "-DDOJO_DECOMP_DIR=" + os.path.abspath(self.decomp_var.get().strip().strip('"')),
-                     "-DDOJO_DISC=" + os.path.abspath(self.disc_bin())]
-        cache = os.path.join(BUILD_DIR, "CMakeCache.txt")
-        if os.path.isfile(cache):
-            # A cache from before the bundled toolchain, from a configure that failed to find the compiler
-            # (no compiler flags, so no optimisation), or from where this folder was before it was moved or
-            # renamed (CMake refuses one made elsewhere) is started over. dojo.ini and the rest stay.
-            with open(cache, encoding="utf-8", errors="replace") as f:
-                text = f.read()
-            home = re.search(r"^CMAKE_HOME_DIRECTORY:INTERNAL=(.*)$", text, re.M)
-            moved = home is not None and \
-                os.path.normcase(os.path.normpath(home.group(1).strip())) != os.path.normcase(os.path.normpath(PORT_DIR))
-            if "CMAKE_C_FLAGS_%s:STRING=\n" % self.build_type.get().upper() in text or \
-                    ("i686-w64-mingw32-clang" if WINDOWS else "zig-cc") not in text or moved:
-                os.remove(cache)
-                shutil.rmtree(os.path.join(BUILD_DIR, "CMakeFiles"), ignore_errors=True)
+        configure = cmake_configure(self.build_type.get(), self.decomp_var.get().strip().strip('"'), self.disc_bin())
         self.run_steps([configure, [CMAKE, "--build", BUILD_DIR]], "Built.", then_play=then_play)
 
     def run_steps(self, steps, success, then_play=False, after=None):
@@ -1320,14 +1463,7 @@ class Launcher:
         self.busy = "build"
         self.update_buttons()
         self.tabs.select(2)
-        env = dict(os.environ)
-        # Only the bundled tools: nothing installed on this PC takes part (on Linux, but the shell and Python).
-        if WINDOWS:
-            env["PATH"] = os.pathsep.join([os.path.join(TOOLCHAIN, "llvm-mingw", "bin"),
-                                           os.path.join(TOOLCHAIN, "ninja"),
-                                           os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")])
-        else:
-            env["PATH"] = os.pathsep.join([os.path.join(TOOLCHAIN, "ninja"), "/usr/bin", "/bin"])
+        env = build_env()
         self.after_steps = after
 
         def work():
@@ -2035,6 +2171,9 @@ class Launcher:
 
 
 def main():
+    code = headless(sys.argv[1:])
+    if code is not None:
+        sys.exit(code)
     try:
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)   # sharp text on high-DPI screens
