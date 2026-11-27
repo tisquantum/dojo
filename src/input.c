@@ -84,6 +84,7 @@ static struct {
 } sPads[MAX_PADS];
 static int sPadCount;
 static int sMenuHeld[MAX_PADS];      /* the menu's combination held on each gamepad, at its last event */
+static unsigned sMenuSlots[MAX_PADS]; /* which of its inputs the events say are held (a bit for each) */
 static int sPlayerPad[2] = {-1, -1}; /* an index into sPads, or -1 */
 static Haptics sHaptics[2];          /* each player's, while their gamepad is a wired DualSense */
 static Uint64 sHapticsRetry;         /* when to look for a DualSense's sound device again */
@@ -162,6 +163,7 @@ void InputDevicesChanged(void)
     }
     sPadCount = 0;
     memset(sMenuHeld, 0, sizeof(sMenuHeld));
+    memset(sMenuSlots, 0, sizeof(sMenuSlots));
     for (i = 0; ids && i < count && sPadCount < MAX_PADS; i++) {
         SDL_Gamepad *pad = SDL_OpenGamepad(ids[i]);
         if (pad) {
@@ -220,17 +222,64 @@ static int BindingHeld(int binding, SDL_Gamepad *pad, const bool *keys, SDL_Mous
     }
 }
 
-int InputMenuCombo(void)
+/* One input of the menu's combination, as one event moves it (a button, or a stick or trigger past its threshold):
+ * 1 pressed, 0 released, -1 not this one. */
+static int ComboEventState(int binding, const SDL_Event *e)
+{
+    int code = binding & 0xFFFF;
+    switch (INPUT_BIND_KIND(binding)) {
+    case INPUT_BIND_PAD(0):
+        if ((e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e->type == SDL_EVENT_GAMEPAD_BUTTON_UP) &&
+            e->gbutton.button == code) {
+            return e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+        }
+        return -1;
+    case INPUT_BIND_AXIS(0, 0):
+        if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && e->gaxis.axis == (code >> 1)) {
+            int value = e->gaxis.value;
+            int on = e->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || e->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER
+                         ? TRIGGER_ON
+                         : g_settings.deadzone * 32767 / 100;
+            return (code & 1) ? value < -on : value > on;
+        }
+        return -1;
+    default:
+        return -1;
+    }
+}
+
+/* Whether this event completes the menu's combination on a gamepad. Each input is followed through the events
+ * themselves, not only the pad's state when the event is handled: a quick press of both, over before the frame's
+ * events are read, would look like nothing was held. The pad's state still counts, for what was held already. */
+int InputMenuCombo(const SDL_Event *e)
 {
     int i, slot, pressed = 0;
+    SDL_JoystickID which = 0;
+    if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e->type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+        which = e->gbutton.which;
+    } else if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION) {
+        which = e->gaxis.which;
+    } else {
+        return 0;
+    }
     for (i = 0; i < sPadCount; i++) {
-        int held = 0, used = 0;
+        int used = 0, held = 0;
         for (slot = 0; slot < SETTINGS_MENU_COMBO; slot++) {
             int binding = g_settings.menuCombo[slot];
             if (binding && (INPUT_BIND_KIND(binding) == INPUT_BIND_PAD(0) ||
                             INPUT_BIND_KIND(binding) == INPUT_BIND_AXIS(0, 0))) {
                 used++;
-                held += BindingHeld(binding, sPads[i].pad, NULL, 0);
+                if (SDL_GetGamepadID(sPads[i].pad) == which) {
+                    int state = ComboEventState(binding, e);
+                    if (state >= 0) {
+                        if (state) {
+                            sMenuSlots[i] |= 1u << slot;
+                        } else {
+                            sMenuSlots[i] &= ~(1u << slot);
+                        }
+                    }
+                }
+                held += ((sMenuSlots[i] >> slot) & 1) || BindingHeld(binding, sPads[i].pad, NULL, 0);
             }
         }
         held = used && held == used;

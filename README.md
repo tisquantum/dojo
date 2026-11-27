@@ -35,8 +35,9 @@ disc image. Don't share builds of the game: `dojo.exe` contains the game's code.
 ### What you need
 
 - **Windows 10 or 11, 64-bit**, or **64-bit Linux** (see *Playing on Linux*).
-- **A graphics card with Vulkan 1.3** (any recent NVIDIA, AMD or Intel driver). Without one, the game can use
-  its software renderer (Settings → Renderer).
+- **A graphics card with Vulkan 1.3**, or 1.1 or newer with the dynamic rendering and synchronization2
+  extensions (any recent NVIDIA, AMD or Intel driver). Without one the game uses its software renderer, which
+  draws 4:3 at the console's resolution: widescreen, resolution, downsampling and the CRT look need Vulkan.
 - **Your own disc image of Bushido Blade (USA)**, ripped as `.bin` + `.cue` (a raw 2352-byte-sector image;
   an `.iso` won't work). The file names don't matter. The launcher's **Verify disc** checks it against the
   known good copy (SHA-256 `c5cba1e3e8bc68f15e32492907ac37add7f8e8d3e10ddb36742a729ce1a970bf`).
@@ -128,6 +129,7 @@ The defaults (every button can be rebound in the launcher's **Controls** tab, or
 | Start / Select | Enter / Backspace | Start / Back |
 | Options menu | F1 or Esc | Guide button, or L3 + R3 held together (two or three inputs of your choice: the launcher's Controls tab) |
 | Go back, leave a queue or a match | Hold Backspace for 2 seconds | Hold Back for 2 seconds |
+| Leave a mode for the main menu (a bout, its replay, the story's scenes, character select and the rest; not online) | Hold Enter + Backspace for 1 second | Hold Start + Select for 1 second (Select alone, outside a bout) |
 | Full screen | F11 | |
 
 The Controls page picks each player's gamepad (auto takes the first free one; with several plugged in, choose

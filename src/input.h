@@ -37,7 +37,7 @@ void InputDefaultBindings(int button);
 /* Puts the menu's gamepad combination (settings.h) back to its default, L3 and R3. */
 void InputDefaultMenuCombo(void);
 /* After each gamepad event: 1 when the menu's combination has just come to be held on some gamepad. */
-int InputMenuCombo(void);
+int InputMenuCombo(const SDL_Event *e);
 /* The binding an event makes for a gamepad slot (pad 1) or a keyboard-and-mouse slot (pad 0), or 0. */
 int InputBindingFromEvent(const SDL_Event *e, int pad);
 void InputBindingName(int binding, char *out, size_t size);

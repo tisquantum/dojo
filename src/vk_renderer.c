@@ -50,7 +50,8 @@
     X(vkDestroyInstance) X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceProperties)                    \
     X(vkGetPhysicalDeviceQueueFamilyProperties) X(vkGetPhysicalDeviceMemoryProperties) X(vkCreateDevice)   \
     X(vkGetDeviceProcAddr) X(vkGetPhysicalDeviceSurfaceSupportKHR) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
-    X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR) X(vkDestroySurfaceKHR)
+    X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR) X(vkDestroySurfaceKHR)  \
+    X(vkEnumerateDeviceExtensionProperties)
 #define VK_DEVICE_FUNCTIONS(X)                                                                             \
     X(vkDestroyDevice) X(vkGetDeviceQueue) X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR)                \
     X(vkGetSwapchainImagesKHR) X(vkAcquireNextImageKHR) X(vkQueuePresentKHR) X(vkCreateImageView)          \
@@ -943,6 +944,49 @@ static void WriteDescriptorSampled(VkDescriptorSet set, VkImageView source, VkSa
     vkUpdateDescriptorSets(V.device, 2, writes, 0, NULL);
 }
 
+/* The extensions a device older than Vulkan 1.3 needs for what 1.3 has built in (dynamic rendering and
+ * synchronization2), with the ones those depend on. A device with all of them draws as a 1.3 one does: the entry
+ * points are the same, found under their KHR names. DOJO_VK_KHR=1 takes this road on a 1.3 device too, to try it. */
+static const char *const kKhrNeeded[] = {VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
+                                         VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME};
+static const char *const kKhrDepends[] = {VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME,
+                                          VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME,
+                                          VK_KHR_MULTIVIEW_EXTENSION_NAME, VK_KHR_MAINTENANCE_2_EXTENSION_NAME};
+
+static int DeviceHas(VkPhysicalDevice dev, const char *name)
+{
+    VkExtensionProperties list[512];
+    uint32_t count = 512, i;
+    if (vkEnumerateDeviceExtensionProperties(dev, NULL, &count, list) < 0) {
+        return 0;
+    }
+    for (i = 0; i < count; i++) {
+        if (strcmp(list[i].extensionName, name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Whether the device can draw: Vulkan 1.3, or 1.1 and up with the extensions that give the same (set in useKhr). */
+static int DeviceUsable(VkPhysicalDevice dev, const VkPhysicalDeviceProperties *props, int *useKhr)
+{
+    uint32_t i;
+    *useKhr = SDL_getenv("DOJO_VK_KHR") != NULL || props->apiVersion < VK_API_VERSION_1_3;
+    if (props->apiVersion < VK_API_VERSION_1_1) {
+        return 0;
+    }
+    if (!*useKhr) {
+        return 1;
+    }
+    for (i = 0; i < sizeof(kKhrNeeded) / sizeof(kKhrNeeded[0]); i++) {
+        if (!DeviceHas(dev, kKhrNeeded[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 int VkRendererInit(SDL_Window *window, int scale, int margin)
 {
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
@@ -954,6 +998,13 @@ int VkRendererInit(SDL_Window *window, int scale, int margin)
     float priority = 1.0f;
     VkDeviceQueueCreateInfo queueInfo = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     VkPhysicalDeviceVulkan13Features features13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamicRendering = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR};
+    VkPhysicalDeviceSynchronization2FeaturesKHR synchronization2 = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR};
+    const char *deviceExtensions[1 + 2 + 4];
+    uint32_t deviceExtensionCount = 0;
+    int useKhr = 0;
     VkDeviceCreateInfo deviceInfo = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     const char *swapchainExtension = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     VkCommandPoolCreateInfo poolInfo = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -1008,7 +1059,7 @@ int VkRendererInit(SDL_Window *window, int scale, int margin)
         uint32_t familyCount = 16, f;
         vkGetPhysicalDeviceProperties(dev, &props);
         if ((i < deviceCount) != (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) ||
-            props.apiVersion < VK_API_VERSION_1_3) {
+            !DeviceUsable(dev, &props, &useKhr)) {
             continue;
         }
         vkGetPhysicalDeviceQueueFamilyProperties(dev, &familyCount, families);
@@ -1018,30 +1069,59 @@ int VkRendererInit(SDL_Window *window, int scale, int margin)
             if ((families[f].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present) {
                 V.physical = dev;
                 V.queueFamily = f;
-                fprintf(stderr, "vulkan: %s\n", props.deviceName);
+                fprintf(stderr, "vulkan: %s (%u.%u%s)\n", props.deviceName, VK_VERSION_MAJOR(props.apiVersion),
+                        VK_VERSION_MINOR(props.apiVersion), useKhr ? ", through extensions" : "");
                 break;
             }
         }
     }
     if (!V.physical) {
+        fprintf(stderr, "vulkan: no graphics card here has Vulkan 1.3, or 1.1 with dynamic rendering and "
+                        "synchronization2: using the software renderer\n");
         return 0;
     }
     queueInfo.queueFamilyIndex = V.queueFamily;
     queueInfo.queueCount = 1;
     queueInfo.pQueuePriorities = &priority;
-    features13.dynamicRendering = VK_TRUE;
-    features13.synchronization2 = VK_TRUE;
-    deviceInfo.pNext = &features13;
+    deviceExtensions[deviceExtensionCount++] = swapchainExtension;
+    if (useKhr) {
+        /* the 1.3 core structures can't be asked of an older device: the same features, one structure each */
+        uint32_t k;
+        dynamicRendering.dynamicRendering = VK_TRUE;
+        synchronization2.synchronization2 = VK_TRUE;
+        dynamicRendering.pNext = &synchronization2;
+        deviceInfo.pNext = &dynamicRendering;
+        for (k = 0; k < sizeof(kKhrNeeded) / sizeof(kKhrNeeded[0]); k++) {
+            deviceExtensions[deviceExtensionCount++] = kKhrNeeded[k];
+        }
+        for (k = 0; k < sizeof(kKhrDepends) / sizeof(kKhrDepends[0]); k++) {
+            if (DeviceHas(V.physical, kKhrDepends[k])) {
+                deviceExtensions[deviceExtensionCount++] = kKhrDepends[k];
+            }
+        }
+    } else {
+        features13.dynamicRendering = VK_TRUE;
+        features13.synchronization2 = VK_TRUE;
+        deviceInfo.pNext = &features13;
+    }
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueInfo;
-    deviceInfo.enabledExtensionCount = 1;
-    deviceInfo.ppEnabledExtensionNames = &swapchainExtension;
+    deviceInfo.enabledExtensionCount = deviceExtensionCount;
+    deviceInfo.ppEnabledExtensionNames = deviceExtensions;
     if (vkCreateDevice(V.physical, &deviceInfo, NULL, &V.device) != VK_SUCCESS) {
         return 0;
     }
 #define LOAD_DEVICE(name) name = (PFN_##name)vkGetDeviceProcAddr(V.device, #name);
     VK_DEVICE_FUNCTIONS(LOAD_DEVICE)
 #undef LOAD_DEVICE
+    if (useKhr) {
+        vkCmdBeginRendering = (PFN_vkCmdBeginRendering)vkGetDeviceProcAddr(V.device, "vkCmdBeginRenderingKHR");
+        vkCmdEndRendering = (PFN_vkCmdEndRendering)vkGetDeviceProcAddr(V.device, "vkCmdEndRenderingKHR");
+        vkCmdPipelineBarrier2 = (PFN_vkCmdPipelineBarrier2)vkGetDeviceProcAddr(V.device, "vkCmdPipelineBarrier2KHR");
+        if (!vkCmdBeginRendering || !vkCmdEndRendering || !vkCmdPipelineBarrier2) {
+            return 0;
+        }
+    }
     vkGetDeviceQueue(V.device, V.queueFamily, 0, &V.queue);
 
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;

@@ -264,6 +264,9 @@ static void ChangeOption(int dir)
         sApply(OVERLAY_CHANGE_SCALE);
         break;
     case OPT_ASPECT:
+        if (!sContext.vulkan) {
+            return;
+        }
         s->aspect = Step(s->aspect, dir ? dir : 1, 0, SETTINGS_ASPECT_COUNT - 1);
         break;
     case OPT_RENDERER:
@@ -672,8 +675,7 @@ static void BackUp(void)
 int OverlayHandleEvent(const SDL_Event *e)
 {
     /* The menu's gamepad combination (L3 and R3 by default) opens and closes it, as F1 does. */
-    int combo = (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e->type == SDL_EVENT_GAMEPAD_BUTTON_UP ||
-                 e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION) && InputMenuCombo();
+    int combo = InputMenuCombo(e);
     if (sOpen && sCaptureSince && Capture(e)) {
         return 1;
     }
@@ -854,7 +856,9 @@ static void OptionValue(int row, char *out, size_t size)
         }
         break;
     case OPT_ASPECT:
-        if (s->aspect == SETTINGS_ASPECT_AUTO && sContext.displayW > 0) {
+        if (!sContext.vulkan) {
+            snprintf(out, size, "4:3 (widescreen needs Vulkan)");
+        } else if (s->aspect == SETTINGS_ASPECT_AUTO && sContext.displayW > 0) {
             snprintf(out, size, "Auto (%dx%d display)%s", sContext.displayW, sContext.displayH,
                      s->aspect != sContext.runningAspect ? "  (on restart)" : "");
         } else {
@@ -864,8 +868,13 @@ static void OptionValue(int row, char *out, size_t size)
         }
         break;
     case OPT_RENDERER:
-        snprintf(out, size, "%s%s", s->software ? "Software" : "Vulkan",
-                 s->software != sContext.runningSoftware ? "  (on restart)" : "");
+        if (!s->software && sContext.runningSoftware && !sContext.vulkan) {
+            /* Vulkan was asked for and this graphics card or driver can't give it: the picture is drawn on the CPU */
+            snprintf(out, size, "Vulkan not available here: software in use");
+        } else {
+            snprintf(out, size, "%s%s", s->software ? "Software" : "Vulkan",
+                     s->software != sContext.runningSoftware ? "  (on restart)" : "");
+        }
         break;
     case OPT_DOWNSAMPLE: {
         static const char *const names[SETTINGS_DOWNSAMPLE_COUNT] = {
@@ -1187,7 +1196,7 @@ static void DrawMenu(void)
         int selected = row == sRow;
         int locked = sPage == PAGE_OPTIONS &&
                      ((row == OPT_FPS && sContext.online) ||
-                      ((row == OPT_SCALE || row == OPT_DOWNSAMPLE || row == OPT_CRT || row == OPT_CURVATURE) &&
+                      ((row == OPT_SCALE || row == OPT_ASPECT || row == OPT_DOWNSAMPLE || row == OPT_CRT || row == OPT_CURVATURE) &&
                        !sContext.vulkan));
         int binding = sPage == PAGE_CONTROLS && row >= CTL_BIND && row < CTL_BACK;
         if (sPage == PAGE_CONTROLS && row == CTL_BIND) {

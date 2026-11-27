@@ -207,7 +207,7 @@ set(SHADER_HEADERS)
 foreach(shader draw.vert draw.frag quad.vert paint.frag downsample.frag present.frag overlay.frag)
     string(REPLACE "." "_" shader_name ${shader})
     set(shader_header ${GENERATED_DIR}/shaders/${shader_name}.h)
-    set(shader_command ${SHADER_COMPILER} -V --target-env vulkan1.3 --vn spv_${shader_name} -o ${shader_header}
+    set(shader_command ${SHADER_COMPILER} -V --target-env vulkan1.1 --vn spv_${shader_name} -o ${shader_header}
         ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader})
     add_custom_command(OUTPUT ${shader_header}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${GENERATED_DIR}/shaders
