@@ -26,7 +26,7 @@ import zipfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-DOJO_VERSION = "0.1.9"
+DOJO_VERSION = "0.1.10"
 
 # The folder of Dojo.exe in a release, of this file in a checkout.
 PORT_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))

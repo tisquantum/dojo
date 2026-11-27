@@ -46,7 +46,7 @@
  * 2: rain and foliage across the widescreen margin (0.1.5). 3: no pausing in a fight (0.1.6). 4: the controllers sampled before
  * every tick, not each field (0.1.6). 5: the opening and story scenes at the rate set (0.1.8). 6: a cut prop's delayed
  * sound and the unused billboard kinds' UVs as on the console, not from the stack (0.1.9). */
-#define SIM_REVISION    6
+#define SIM_REVISION    7
 #define PUNCH_MS        150
 #define RELAY_AFTER_MS  1500 /* no direct answer by then: through the server */
 #define SETUP_GIVE_UP_MS 20000

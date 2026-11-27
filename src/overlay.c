@@ -11,6 +11,7 @@
 #include "settings.h"
 #include "online.h"
 #include "input.h"
+#include "pc_gameui.h"
 
 #define BACK_HOLD_MS 2000
 #define TOAST_MS     5000
@@ -91,6 +92,13 @@ static int sCol;             /* the controls page's column on a binding row */
 static int sScroll;          /* the first line shown of a page too long for the panel */
 static Uint64 sCaptureSince; /* when a binding began waiting for its button, or 0 */
 
+/* The game's own menu and hold bar (pc_gameui.h): each stays up GAME_UI_MS after the game last asked. */
+#define GAME_UI_MS    250
+#define GAME_MENU_MAX 4
+static char sGameTitle[32], sGameItems[GAME_MENU_MAX][32], sGameHoldWhat[48];
+static int sGameCount, sGameCursor, sGameHold; /* the menu's rows (0: none), its cursor, the hold's percent */
+static Uint64 sGameMenuUntil, sGameHoldUntil;
+
 void OverlayInit(const OverlayContext *context, void (*apply)(OverlayChange change))
 {
     sContext = *context;
@@ -147,6 +155,43 @@ static void Toast(const char *text)
     snprintf(sToast, sizeof(sToast), "%s", text);
     sToastUntil = SDL_GetTicksNS() + (Uint64)TOAST_MS * 1000000ull;
     sDirty = 1;
+}
+
+void PcGameMenu(const char *title, const char *const *items, int count, int cursor)
+{
+    int i;
+    char old[sizeof(sGameItems)];
+    memcpy(old, sGameItems, sizeof(old));
+    if (count > GAME_MENU_MAX) {
+        count = GAME_MENU_MAX;
+    }
+    snprintf(sGameTitle, sizeof(sGameTitle), "%s", title);
+    for (i = 0; i < count; i++) {
+        snprintf(sGameItems[i], sizeof(sGameItems[i]), "%s", items[i]);
+    }
+    if (!sGameMenuUntil || count != sGameCount || cursor != sGameCursor || memcmp(old, sGameItems, sizeof(old))) {
+        sDirty = 1;
+    }
+    sGameCount = count;
+    sGameCursor = cursor;
+    sGameMenuUntil = SDL_GetTicksNS() + (Uint64)GAME_UI_MS * 1000000ull;
+}
+
+void PcGameHold(int percent, const char *what)
+{
+    if (percent < 0) {
+        percent = 0;
+    }
+    if (percent > 100) {
+        percent = 100;
+    }
+    /* a step of 4 is smooth enough to see, and keeps the picture from being redrawn every frame */
+    if (!sGameHoldUntil || percent / 4 != sGameHold / 4 || strcmp(what, sGameHoldWhat) != 0) {
+        sDirty = 1;
+    }
+    snprintf(sGameHoldWhat, sizeof(sGameHoldWhat), "%s", what);
+    sGameHold = percent;
+    sGameHoldUntil = SDL_GetTicksNS() + (Uint64)GAME_UI_MS * 1000000ull;
 }
 
 /* The previous page; from the waiting page, leaving the queue or room. */
@@ -1216,6 +1261,38 @@ static void DrawBackHold(void)
     Text(x + (w - 8 * (float)strlen(what)) / 2, y + 9, 1, what, 255, 240, 220);
 }
 
+/* The game's menu, a panel over the middle of the picture, and its hold bar. */
+static void DrawGameUi(void)
+{
+    if (sGameMenuUntil && sGameCount > 0) {
+        const float rowH = 28, w = 280, h = 52 + rowH * (float)sGameCount, x = (OVERLAY_WIDTH - w) / 2,
+                    y = (OVERLAY_HEIGHT - h) / 2;
+        int i;
+        Fill(x, y, w, h, 0, 0, 0, 215);
+        Fill(x, y, w, 2, 170, 40, 30, 255);
+        Fill(x, y + h - 2, w, 2, 170, 40, 30, 255);
+        Text(x + (w - 16 * (float)strlen(sGameTitle)) / 2, y + 14, 2, sGameTitle, 235, 220, 190);
+        for (i = 0; i < sGameCount; i++) {
+            float ry = y + 46 + rowH * (float)i;
+            if (i == sGameCursor) {
+                Fill(x + 10, ry - 4, w - 20, rowH - 2, 120, 28, 20, 255);
+            }
+            Text(x + (w - 16 * (float)strlen(sGameItems[i])) / 2, ry + 2, 2, sGameItems[i],
+                 i == sGameCursor ? 255 : 190, i == sGameCursor ? 240 : 180, i == sGameCursor ? 220 : 160);
+        }
+    }
+    if (sGameHoldUntil && sGameHold > 0) {
+        const float w = 280, h = 26, x = (OVERLAY_WIDTH - w) / 2, y = OVERLAY_HEIGHT - 46;
+        Fill(x, y, w, h, 0, 0, 0, 200);
+        Fill(x + 3, y + 3, (w - 6) * (float)sGameHold / 100, h - 6, 170, 40, 30, 255);
+        Text(x + (w - 8 * (float)strlen(sGameHoldWhat)) / 2, y + 9, 1, sGameHoldWhat, 255, 240, 220);
+    } else if (sGameHoldUntil) {
+        /* nothing held yet: the hint for what holding does */
+        Fill(4, OVERLAY_HEIGHT - 20, 8 * (float)strlen(sGameHoldWhat) + 8, 16, 0, 0, 0, 150);
+        Text(8, OVERLAY_HEIGHT - 16, 1, sGameHoldWhat, 200, 190, 170);
+    }
+}
+
 /* Each picture: the hold on Back, the online state's turns, messages, the banner. */
 static void Update(void)
 {
@@ -1223,6 +1300,17 @@ static void Update(void)
     const char *message = OnlineTakeMessage();
     char banner[160];
     Uint64 now = SDL_GetTicksNS();
+
+    if (sGameMenuUntil && now > sGameMenuUntil) {
+        sGameMenuUntil = 0;
+        sGameCount = 0;
+        sDirty = 1;
+    }
+    if (sGameHoldUntil && now > sGameHoldUntil) {
+        sGameHoldUntil = 0;
+        sGameHold = 0;
+        sDirty = 1;
+    }
 
     if (message) {
         Toast(message);
@@ -1313,7 +1401,7 @@ const uint32_t *OverlayPicture(int *changed)
 {
     int show;
     Update();
-    show = sOpen || g_settings.showFps || sBanner[0] || sToast[0] || sBackShown;
+    show = sOpen || g_settings.showFps || sBanner[0] || sToast[0] || sBackShown || sGameMenuUntil || sGameHoldUntil;
     *changed = 0;
     if (!sDraw || !show) {
         if (sShown) {
@@ -1331,6 +1419,7 @@ const uint32_t *OverlayPicture(int *changed)
             DrawMenu();
         } else {
             DrawHud();
+            DrawGameUi();
         }
         if (sBackShown) {
             DrawBackHold();
