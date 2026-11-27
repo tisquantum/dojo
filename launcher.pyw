@@ -26,7 +26,7 @@ import zipfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-DOJO_VERSION = "0.1.11"
+DOJO_VERSION = "0.1.12"
 
 # The folder of Dojo.exe in a release, of this file in a checkout.
 PORT_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
@@ -38,7 +38,7 @@ DECOMP_DIR = os.path.join(PORT_DIR, "decomp")
 
 # The decompilation, with Dojo's changes, this version is built from: a branch of a fork of the decompilation,
 # fetched at this exact commit.
-DECOMP_COMMIT = "77e7724bd80491a99c1c072c3880b4cac72b3fbe"
+DECOMP_COMMIT = "c3d0315b1a79cd06211ed2fe84f0d910ed12d334"
 DECOMP_URL = "https://github.com/tisquantum/bushido/archive/%s.zip" % DECOMP_COMMIT
 DECOMP_STAMP = ".dojo-decomp"
 BUILD_DIR = os.path.join(PORT_DIR, "build")
